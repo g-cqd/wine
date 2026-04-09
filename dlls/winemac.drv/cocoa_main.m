@@ -88,8 +88,8 @@ static void run_cocoa_app(void* info)
             startup_info->success = TRUE;
         }
 
-        /* Save success to a local before unlocking: startup_info points to
-           the caller's stack frame, which may be gone once we unlock. */
+        /* Save success to a local before unlocking — startup_info points to
+           the caller's stack frame which may be destroyed once we unlock. */
         success = startup_info->success;
 
         /* Retain the lock while we're using it, so macdrv_start_cocoa_app()
