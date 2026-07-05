@@ -991,11 +991,20 @@ case $host_os in
     AC_SUBST(SECURITY_LIBS,"-framework Security -framework CoreFoundation")
     AC_SUBST(SYSTEMCONFIGURATION_LIBS,"-framework SystemConfiguration")
 
-    WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
+    WINELOADER_LDFLAGS="-Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
 
+    dnl Shrinking __PAGEZERO below its default 4GB size is needed to let the
+    dnl i386/x86_64 preloader reclaim low memory addresses, and is tolerated
+    dnl by the kernel's Mach-O loader on those architectures. On arm64 the
+    dnl kernel refuses to exec (SIGKILL) any image with a non-default
+    dnl __PAGEZERO size, so it must not be applied there.
     case $HOST_ARCH in
-      i386) wine_use_preloader=yes ;;
+      i386)
+        wine_use_preloader=yes
+        WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000 $WINELOADER_LDFLAGS"
+        ;;
       x86_64)
+        WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000 $WINELOADER_LDFLAGS"
         dnl If the -no_huge linker option is present (added in Xcode 15.3), use zerofill sections instead of the preloader
         WINE_TRY_CFLAGS([-Wl,-no_huge],
            [wine_use_preloader=no
