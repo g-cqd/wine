@@ -39,6 +39,21 @@ struct msl_dst
     struct vkd3d_string_buffer *mask;
 };
 
+struct msl_descriptor_cache_entry
+{
+    enum vkd3d_shader_descriptor_type type;
+    unsigned int register_id;
+    const struct vkd3d_shader_descriptor_info1 *descriptor;
+};
+
+struct msl_binding_cache_entry
+{
+    const struct vkd3d_shader_descriptor_info1 *descriptor;
+    unsigned int register_idx;
+    bool found;
+    unsigned int binding;
+};
+
 struct msl_generator
 {
     struct vsir_program *program;
@@ -53,6 +68,17 @@ struct msl_generator
     bool read_vertex_id;
 
     const struct vkd3d_shader_interface_info *interface_info;
+
+    /* Caches for vkd3d_shader_find_descriptor() and msl_get_binding(), which
+     * are otherwise looked up again from scratch for every instruction that
+     * references the same descriptor or binding. */
+    struct msl_descriptor_cache_entry *descriptor_cache;
+    size_t descriptor_cache_count;
+    size_t descriptor_cache_capacity;
+
+    struct msl_binding_cache_entry *binding_cache;
+    size_t binding_cache_count;
+    size_t binding_cache_capacity;
 };
 
 struct msl_resource_type_info
@@ -209,58 +235,82 @@ static bool msl_check_shader_visibility(const struct msl_generator *gen,
     }
 }
 
-static bool msl_get_binding(const struct msl_generator *gen, const struct vkd3d_shader_descriptor_info1 *descriptor,
+static bool msl_get_binding(struct msl_generator *gen, const struct vkd3d_shader_descriptor_info1 *descriptor,
         unsigned int register_idx, enum vkd3d_shader_binding_flag flags, unsigned int *idx)
 {
     const struct vkd3d_shader_interface_info *interface_info = gen->interface_info;
+    struct msl_binding_cache_entry *entry;
+    bool found = false;
     unsigned int i;
 
-    if (!interface_info)
-        return false;
-
-    for (i = 0; i < interface_info->binding_count; ++i)
+    for (i = 0; i < gen->binding_cache_count; ++i)
     {
-        const struct vkd3d_shader_resource_binding *binding = &interface_info->bindings[i];
-
-        if (binding->type != descriptor->type)
-            continue;
-        if (binding->register_space != descriptor->register_space)
-            continue;
-        if (binding->register_index > descriptor->register_index)
-            continue;
-        if (descriptor->count != ~0u && binding->binding.count < descriptor->count)
-            continue;
-        if (descriptor->count != ~0u
-                && binding->binding.count - descriptor->count < descriptor->register_index - binding->register_index)
-            continue;
-        if (descriptor->count == ~0u
-                && binding->binding.count <= descriptor->register_index - binding->register_index)
-            continue;
-        if (!msl_check_shader_visibility(gen, binding->shader_visibility))
-            continue;
-        if ((binding->flags & flags) != flags)
-            continue;
-
-        *idx = register_idx + binding->binding.binding - binding->register_index;
-        return true;
+        entry = &gen->binding_cache[i];
+        if (entry->descriptor == descriptor && entry->register_idx == register_idx)
+        {
+            if (entry->found)
+                *idx = entry->binding;
+            return entry->found;
+        }
     }
 
-    return false;
+    if (interface_info)
+    {
+        for (i = 0; i < interface_info->binding_count; ++i)
+        {
+            const struct vkd3d_shader_resource_binding *binding = &interface_info->bindings[i];
+
+            if (binding->type != descriptor->type)
+                continue;
+            if (binding->register_space != descriptor->register_space)
+                continue;
+            if (binding->register_index > descriptor->register_index)
+                continue;
+            if (descriptor->count != ~0u && binding->binding.count < descriptor->count)
+                continue;
+            if (descriptor->count != ~0u && binding->binding.count - descriptor->count
+                    < descriptor->register_index - binding->register_index)
+                continue;
+            if (descriptor->count == ~0u
+                    && binding->binding.count <= descriptor->register_index - binding->register_index)
+                continue;
+            if (!msl_check_shader_visibility(gen, binding->shader_visibility))
+                continue;
+            if ((binding->flags & flags) != flags)
+                continue;
+
+            *idx = register_idx + binding->binding.binding - binding->register_index;
+            found = true;
+            break;
+        }
+    }
+
+    if (vkd3d_array_reserve((void **)&gen->binding_cache, &gen->binding_cache_capacity,
+            gen->binding_cache_count + 1, sizeof(*gen->binding_cache)))
+    {
+        entry = &gen->binding_cache[gen->binding_cache_count++];
+        entry->descriptor = descriptor;
+        entry->register_idx = register_idx;
+        entry->found = found;
+        entry->binding = found ? *idx : 0;
+    }
+
+    return found;
 }
 
-static bool msl_get_cbv_binding(const struct msl_generator *gen,
+static bool msl_get_cbv_binding(struct msl_generator *gen,
         const struct vkd3d_shader_descriptor_info1 *descriptor, unsigned int register_idx, unsigned int *idx)
 {
     return msl_get_binding(gen, descriptor, register_idx, VKD3D_SHADER_BINDING_FLAG_BUFFER, idx);
 }
 
-static bool msl_get_sampler_binding(const struct msl_generator *gen,
+static bool msl_get_sampler_binding(struct msl_generator *gen,
         const struct vkd3d_shader_descriptor_info1 *descriptor, unsigned int register_idx, unsigned int *idx)
 {
     return msl_get_binding(gen, descriptor, register_idx, 0, idx);
 }
 
-static bool msl_get_srv_binding(const struct msl_generator *gen,
+static bool msl_get_srv_binding(struct msl_generator *gen,
         const struct vkd3d_shader_descriptor_info1 *descriptor, unsigned int register_idx, unsigned int *idx)
 {
     return msl_get_binding(gen, descriptor, register_idx,
@@ -268,12 +318,40 @@ static bool msl_get_srv_binding(const struct msl_generator *gen,
             ? VKD3D_SHADER_BINDING_FLAG_BUFFER : VKD3D_SHADER_BINDING_FLAG_IMAGE, idx);
 }
 
-static bool msl_get_uav_binding(const struct msl_generator *gen,
+static bool msl_get_uav_binding(struct msl_generator *gen,
         const struct vkd3d_shader_descriptor_info1 *descriptor, unsigned int register_idx, unsigned int *idx)
 {
     return msl_get_binding(gen, descriptor, register_idx,
             descriptor->resource_type == VKD3D_SHADER_RESOURCE_BUFFER
             ? VKD3D_SHADER_BINDING_FLAG_BUFFER : VKD3D_SHADER_BINDING_FLAG_IMAGE, idx);
+}
+
+static const struct vkd3d_shader_descriptor_info1 *msl_find_descriptor(struct msl_generator *gen,
+        enum vkd3d_shader_descriptor_type type, unsigned int register_id)
+{
+    const struct vkd3d_shader_descriptor_info1 *descriptor;
+    struct msl_descriptor_cache_entry *entry;
+    size_t i;
+
+    for (i = 0; i < gen->descriptor_cache_count; ++i)
+    {
+        entry = &gen->descriptor_cache[i];
+        if (entry->type == type && entry->register_id == register_id)
+            return entry->descriptor;
+    }
+
+    descriptor = vkd3d_shader_find_descriptor(&gen->program->descriptors, type, register_id);
+
+    if (vkd3d_array_reserve((void **)&gen->descriptor_cache, &gen->descriptor_cache_capacity,
+            gen->descriptor_cache_count + 1, sizeof(*gen->descriptor_cache)))
+    {
+        entry = &gen->descriptor_cache[gen->descriptor_cache_count++];
+        entry->type = type;
+        entry->register_id = register_id;
+        entry->descriptor = descriptor;
+    }
+
+    return descriptor;
 }
 
 static void msl_print_cbv_name(struct vkd3d_string_buffer *buffer, unsigned int binding)
@@ -403,8 +481,7 @@ static enum msl_data_type msl_print_register_name(struct vkd3d_string_buffer *bu
             cbv_id = reg->idx[0].offset;
             cbv_idx = reg->idx[1].offset;
 
-            if (!(descriptor = vkd3d_shader_find_descriptor(&gen->program->descriptors,
-                    VKD3D_SHADER_DESCRIPTOR_TYPE_CBV, cbv_id)))
+            if (!(descriptor = msl_find_descriptor(gen, VKD3D_SHADER_DESCRIPTOR_TYPE_CBV, cbv_id)))
             {
                 msl_compiler_error(gen, VKD3D_SHADER_ERROR_MSL_INTERNAL,
                         "Internal compiler error: Undeclared CBV descriptor %u.", cbv_id);
@@ -936,8 +1013,7 @@ static void msl_ld(struct msl_generator *gen, const struct vkd3d_shader_instruct
 
     resource_id = ins->src[1].reg.idx[0].offset;
     resource_idx = ins->src[1].reg.idx[1].offset;
-    if ((descriptor = vkd3d_shader_find_descriptor(&gen->program->descriptors,
-            VKD3D_SHADER_DESCRIPTOR_TYPE_SRV, resource_id)))
+    if ((descriptor = msl_find_descriptor(gen, VKD3D_SHADER_DESCRIPTOR_TYPE_SRV, resource_id)))
     {
         resource_type = descriptor->resource_type;
         resource_space = descriptor->register_space;
@@ -1061,8 +1137,7 @@ static void msl_sample(struct msl_generator *gen, const struct vkd3d_shader_inst
 
     resource_id = resource->reg.idx[0].offset;
     resource_idx = resource->reg.idx[1].offset;
-    if ((d = vkd3d_shader_find_descriptor(&gen->program->descriptors,
-            VKD3D_SHADER_DESCRIPTOR_TYPE_SRV, resource_id)))
+    if ((d = msl_find_descriptor(gen, VKD3D_SHADER_DESCRIPTOR_TYPE_SRV, resource_id)))
     {
         resource_space = d->register_space;
         resource_type = d->resource_type;
@@ -1108,8 +1183,7 @@ static void msl_sample(struct msl_generator *gen, const struct vkd3d_shader_inst
 
     sampler_id = sampler->reg.idx[0].offset;
     sampler_idx = sampler->reg.idx[1].offset;
-    if ((d = vkd3d_shader_find_descriptor(&gen->program->descriptors,
-            VKD3D_SHADER_DESCRIPTOR_TYPE_SAMPLER, sampler_id)))
+    if ((d = msl_find_descriptor(gen, VKD3D_SHADER_DESCRIPTOR_TYPE_SAMPLER, sampler_id)))
     {
         sampler_space = d->register_space;
         comparison_sampler = d->flags & VKD3D_SHADER_DESCRIPTOR_INFO_FLAG_SAMPLER_COMPARISON_MODE;
@@ -1243,8 +1317,7 @@ static void msl_store_uav_typed(struct msl_generator *gen, const struct vkd3d_sh
 
     uav_id = ins->dst[0].reg.idx[0].offset;
     uav_idx = ins->dst[0].reg.idx[1].offset;
-    if ((d = vkd3d_shader_find_descriptor(&gen->program->descriptors,
-            VKD3D_SHADER_DESCRIPTOR_TYPE_UAV, uav_id)))
+    if ((d = msl_find_descriptor(gen, VKD3D_SHADER_DESCRIPTOR_TYPE_UAV, uav_id)))
     {
         uav_space = d->register_space;
         resource_type = d->resource_type;
@@ -2357,6 +2430,8 @@ static int msl_generator_generate(struct msl_generator *gen, struct vkd3d_shader
 
 static void msl_generator_cleanup(struct msl_generator *gen)
 {
+    vkd3d_free(gen->binding_cache);
+    vkd3d_free(gen->descriptor_cache);
     vkd3d_string_buffer_release(&gen->string_buffers, gen->buffer);
     vkd3d_string_buffer_cache_cleanup(&gen->string_buffers);
 }
