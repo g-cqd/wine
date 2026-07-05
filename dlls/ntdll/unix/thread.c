@@ -64,6 +64,7 @@
 
 #ifdef __APPLE__
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #endif
 #ifdef __FreeBSD__
 #include <sys/thr.h>
@@ -2024,6 +2025,40 @@ BOOL get_thread_times(int unix_pid, int unix_tid, LARGE_INTEGER *kernel_time, LA
     }
     procstat_close(pstat);
     return ret;
+#elif defined(__APPLE__)
+    kern_return_t kr;
+    mach_msg_type_number_t count;
+
+    if (unix_pid != getpid())
+    {
+        static int once;
+        if (!once++) FIXME("cross-process thread times not supported\n");
+        return FALSE;
+    }
+
+    if (unix_tid == -1)
+    {
+        struct task_absolutetime_info info;
+        static mach_timebase_info_data_t timebase;
+
+        if (!timebase.denom) mach_timebase_info( &timebase );
+        count = TASK_ABSOLUTETIME_INFO_COUNT;
+        kr = task_info( mach_task_self(), TASK_ABSOLUTETIME_INFO, (task_info_t)&info, &count );
+        if (kr != KERN_SUCCESS) return FALSE;
+        kernel_time->QuadPart = info.total_system * timebase.numer / timebase.denom / 100;
+        user_time->QuadPart = info.total_user * timebase.numer / timebase.denom / 100;
+    }
+    else
+    {
+        struct thread_basic_info info;
+
+        count = THREAD_BASIC_INFO_COUNT;
+        kr = thread_info( (thread_act_t)unix_tid, THREAD_BASIC_INFO, (thread_info_t)&info, &count );
+        if (kr != KERN_SUCCESS) return FALSE;
+        kernel_time->QuadPart = (ULONGLONG)info.system_time.seconds * 10000000 + info.system_time.microseconds * 10;
+        user_time->QuadPart = (ULONGLONG)info.user_time.seconds * 10000000 + info.user_time.microseconds * 10;
+    }
+    return TRUE;
 #else
     static int once;
     if (!once++) FIXME("not implemented on this platform\n");
