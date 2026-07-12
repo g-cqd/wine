@@ -932,7 +932,6 @@ static void preloader_exec( char **argv, const char *image_path, WORD machine )
         apply_compatdb_env( env );
         free( env );
     }
-
 #ifdef HAVE_WINE_PRELOADER
     asprintf( &argv[0], "%s-preloader", argv[1] );
 #ifdef __APPLE__
@@ -3040,6 +3039,7 @@ static void x87_coop_unhooked( const char *reason )
 static void x87_cooperative_handshake(void)
 {
     char *name = getenv( X87_COOP_ENV );
+    int verbose = getenv( "X87_LOGS" ) != NULL;
     mach_port_t bootstrap_port = MACH_PORT_NULL;
     mach_port_t service = MACH_PORT_NULL;
     mach_port_t reply = MACH_PORT_NULL;
@@ -3070,6 +3070,7 @@ static void x87_cooperative_handshake(void)
     kr = bootstrap_look_up( bootstrap_port, name, &service );
     if (kr != KERN_SUCCESS)
     {
+        ERR( "x87 coop: bootstrap_look_up(%s) failed 0x%x\n", name, kr );
         snprintf( reason, sizeof(reason), "SIDECAR SERVICE NOT FOUND, ERROR 0X%X", kr );
         goto done;
     }
@@ -3096,9 +3097,11 @@ static void x87_cooperative_handshake(void)
                    MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL );
     if (kr != KERN_SUCCESS)
     {
+        ERR( "x87 coop: handshake send failed 0x%x\n", kr );
         snprintf( reason, sizeof(reason), "HANDSHAKE SEND FAILED, ERROR 0X%X", kr );
         goto done;
     }
+    if (verbose) ERR( "x87 coop: handed over task+thread ports; blocking for reply\n" );
 
     /* Block until the sidecar has done its install and replies. The receive
      * buffer needs room for the header AND the kernel-appended trailer. If the
@@ -3108,6 +3111,8 @@ static void x87_cooperative_handshake(void)
     memset( &rep, 0, sizeof(rep) );
     kr = mach_msg( &rep.reply.header, MACH_RCV_MSG, 0, sizeof(rep), reply,
                    MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL );
+    if (verbose) ERR( "x87 coop: handshake reply kr=0x%x id=0x%x size=%u\n", kr,
+                      rep.reply.header.msgh_id, rep.reply.header.msgh_size );
 
     if (kr != KERN_SUCCESS)
         snprintf( reason, sizeof(reason), "RECEIVE FAILED, ERROR 0X%X", kr );
