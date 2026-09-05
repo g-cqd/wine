@@ -1696,7 +1696,10 @@ static void add_gpu( const char *name, const struct pci_id *pci_id, const GUID *
            pci_id->subsystem, pci_id->revision, debugstr_guid( vulkan_uuid ) );
 
     if (!enum_key && !(enum_key = reg_create_ascii_key( NULL, enum_keyA, 0, NULL )))
+    {
+        ERR( "Failed to create enum key\n" );
         return;
+    }
 
     if (!ctx->mutex)
     {
@@ -1704,7 +1707,11 @@ static void add_gpu( const char *name, const struct pci_id *pci_id, const GUID *
         prepare_devices();
     }
 
-    if (!(gpu = calloc( 1, sizeof(*gpu) ))) return;
+    if (!(gpu = calloc( 1, sizeof(*gpu) )))
+    {
+        ERR( "Failed to allocate gpu\n" );
+        return;
+    }
     gpu->refcount = 1;
     gpu->index = ctx->gpu_count;
 
@@ -1734,7 +1741,11 @@ static void add_gpu( const char *name, const struct pci_id *pci_id, const GUID *
 
     snprintf( gpu->path, sizeof(gpu->path), "PCI\\VEN_%04X&DEV_%04X&SUBSYS_%08X&REV_%02X\\%08X",
               pci_id->vendor, pci_id->device, pci_id->subsystem, pci_id->revision, gpu->index );
-    if (!(hkey = reg_create_ascii_key( enum_key, gpu->path, 0, NULL ))) return;
+    if (!(hkey = reg_create_ascii_key( enum_key, gpu->path, 0, NULL )))
+    {
+        ERR( "Failed to create gpu key %s\n", debugstr_a(gpu->path) );
+        return;
+    }
 
     if ((subkey = reg_create_ascii_key( hkey, "Device Parameters", 0, NULL )))
     {
@@ -1775,7 +1786,7 @@ static void add_gpu( const char *name, const struct pci_id *pci_id, const GUID *
 
     if (!write_gpu_to_registry( gpu, pci_id, vulkan_gpu ? vulkan_gpu->memory : 0 ))
     {
-        WARN( "Failed to write gpu %p to registry\n", gpu );
+        ERR( "Failed to write gpu %p to registry\n", gpu );
         gpu_release( gpu );
     }
     else
