@@ -871,7 +871,8 @@ static BOOL is_unix_console_handle( HANDLE handle )
  *           spawn_process
  */
 static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
-                               int unixdir, char *winedebug, const struct pe_image_info *pe_info )
+                               int unixdir, char *winedebug, const struct pe_image_info *pe_info,
+                               int x87, const char *x87_sidecar )
 {
     NTSTATUS status = STATUS_SUCCESS;
     int stdin_fd = -1, stdout_fd = -1;
@@ -888,7 +889,8 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
         isatty(1) && is_unix_console_handle( params->hStdOutput ))
         stdout_fd = 1;
 
-    /* CrossOver Hack 10523: shunt the loading to CrossOver */
+    /* CrossOver Hack 10523: shunt the loading to CrossOver. The x87sidecar
+     * decision in x87 is not carried over to a process started this way. */
     if (send_to_cx_loader(params, socketfd, stdin_fd, stdout_fd,
                           winedebug, pe_info))
         goto done;
@@ -897,6 +899,10 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
     {
         if (!(pid = fork()))  /* grandchild */
         {
+            /* Decided by the parent, so that compatdb.so is not called after fork
+             * and the environment changes below do not change the decision. */
+            set_compat_x87( x87, x87_sidecar );
+
             if ((peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
                 params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                 params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
@@ -1218,7 +1224,8 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     char *unix_name = NULL;
     struct startup_info_data *startup_info = NULL;
     ULONG startup_info_size, env_size;
-    int unixdir, socketfd[2] = { -1, -1 };
+    int unixdir, socketfd[2] = { -1, -1 }, x87 = 0;
+    const char *x87_sidecar;
     struct pe_image_info pe_info;
     CLIENT_ID id;
     USHORT machine = 0;
@@ -1406,7 +1413,41 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
 
     /* create the child process */
 
-    if ((status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info ))) goto done;
+    /* Decide here, before fork, whether an i386 child runs under the x87sidecar:
+     * not without a sidecar, otherwise unless compatdb.so says no. */
+    if ((x87_sidecar = get_x87_sidecar_path()))
+    {
+        WORD exec_machine = pe_info.machine;
+
+        if (pe_info.image_flags & IMAGE_FLAGS_ComPlusNativeReady) exec_machine = native_machine;
+        if (exec_machine == IMAGE_FILE_MACHINE_I386)
+        {
+            /* A builtin whose placeholder file does not exist yet, as happens while
+             * the prefix is created, has no unix name; pass the DOS image path
+             * then, so that compatdb.so can still match it by basename. */
+            const char *path = unix_name;
+            char *dos_path = NULL;
+
+            if (!path && params->ImagePathName.Length)
+            {
+                DWORD len = params->ImagePathName.Length / sizeof(WCHAR);
+                int ret;
+
+                if ((dos_path = malloc( len * 3 + 1 )) &&
+                    (ret = ntdll_wcstoumbs( params->ImagePathName.Buffer, len, dos_path, len * 3, FALSE )) > 0)
+                {
+                    dos_path[ret] = 0;
+                    path = dos_path;
+                }
+            }
+            x87 = query_compatdb_x87( path ) ? 1 : 0;
+            if (!x87) WARN( "compatdb.so keeps the x87sidecar away from %s\n", debugstr_a( path ));
+            free( dos_path );
+        }
+    }
+
+    if ((status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info,
+                                 x87, x87_sidecar ))) goto done;
 
     close( socketfd[0] );
     socketfd[0] = -1;

@@ -387,6 +387,44 @@ void prepend_dll_path(const char *path)
         dll_path_maxlen = path_len;
 }
 
+/* CW Hack 24067: process DPI awareness chosen by compatdb.so: -1 unset, 0 unaware,
+ * 1 aware; any other value is treated as unset */
+static int compat_dpi_awareness = -1;
+
+/* CW Hack 24067 */
+__attribute__((visibility("default")))
+void set_compat_dpi_awareness( int aware )
+{
+    compat_dpi_awareness = aware;
+}
+
+/***********************************************************************
+ *           ntdll_get_compat_dpi_awareness  (ntdll.so)
+ *
+ * CW Hack 24067
+ */
+int ntdll_get_compat_dpi_awareness(void)
+{
+    return compat_dpi_awareness;
+}
+
+/* Large address awareness of a 32-bit process chosen by compatdb.so: -1 unset,
+ * 0 do not force it, 1 force it. Without forcing, the IMAGE_FILE_LARGE_ADDRESS_AWARE
+ * flag of the executable, WINE_LARGE_ADDRESS_AWARE and the AppDefaults
+ * LargeAddressAware value decide as before. */
+static int compat_large_address_aware = -1;
+
+__attribute__((visibility("default")))
+void set_compat_large_address_aware( int value )
+{
+    compat_large_address_aware = value;
+}
+
+int get_compat_large_address_aware(void)
+{
+    return compat_large_address_aware;
+}
+
 static void set_dll_path(void)
 {
     char *p, *path = getenv( "WINEDLLPATH" );
@@ -687,6 +725,132 @@ static WORD get_pe_file_machine( const char *path )
     return ret;
 }
 
+/***********************************************************************
+ *           get_x87_sidecar_path
+ *
+ * The x87sidecar that i386 processes are started under: ROSETTA_X87_PATH if
+ * it is set, none if it is set but empty, otherwise the x87sidecar installed
+ * next to wine in bin_dir, if there is one. Only an x86_64 build, which runs
+ * under Rosetta on Apple silicon, looks for the installed one.
+ */
+const char *get_x87_sidecar_path(void)
+{
+    const char *path = getenv( "ROSETTA_X87_PATH" );
+
+    if (path) return *path ? path : NULL;
+#if defined(__APPLE__) && defined(__x86_64__)
+    {
+        static char *bundled;
+
+        if (!bin_dir) return NULL;
+        if (!bundled) bundled = build_path( bin_dir, "x87sidecar" );
+        return access( bundled, X_OK ) ? NULL : bundled;
+    }
+#else
+    return NULL;
+#endif
+}
+
+/* Whether to start this process under the x87sidecar: -1 undecided, 0 no,
+ * 1 yes. spawn_process sets it in the child, together with the sidecar to
+ * use, from what the parent decided; the first process of a launch decides
+ * for itself in preloader_exec. The path is copied into a static buffer so
+ * that the child does not allocate memory for it between fork and exec. */
+static int compat_x87 = -1;
+static char compat_x87_sidecar[PATH_MAX];
+
+void set_compat_x87( int value, const char *sidecar )
+{
+    compat_x87 = value;
+    if (!value) return;
+    if (!sidecar || strlen( sidecar ) >= sizeof(compat_x87_sidecar)) compat_x87 = 0;
+    else strcpy( compat_x87_sidecar, sidecar );
+}
+
+/* Non-zero while compatdb.so is loaded only to answer a query before ntdll
+ * is initialized. Its initializer checks this and does nothing then. */
+static int compatdb_preinit;
+
+__attribute__((visibility("default")))
+int compatdb_preinit_query(void)
+{
+    return compatdb_preinit;
+}
+
+/***********************************************************************
+ *           query_compatdb_x87_preinit
+ *
+ * Ask compatdb.so whether the x87sidecar should run the executable named by
+ * path, from a process in which ntdll is not initialized yet. Returns 1 for
+ * yes, 0 for no, -1 if the library has no opinion or cannot be loaded.
+ */
+static int query_compatdb_x87_preinit( const char *path )
+{
+    int (*query)( const char * );
+    char *name = NULL;
+    void *handle;
+    int ret = -1;
+
+    if (!ntdll_dir) return -1;
+    asprintf( &name, "%s/compatdb.so", ntdll_dir );
+    if (!name) return -1;
+    compatdb_preinit = 1;
+    if ((handle = dlopen( name, RTLD_NOW | RTLD_LOCAL )))
+    {
+        if ((query = dlsym( handle, "compatdb_query_x87" ))) ret = query( path );
+        dlclose( handle );
+    }
+    compatdb_preinit = 0;
+    free( name );
+    return ret;
+}
+
+/***********************************************************************
+ *           get_dos_drive_unix_path
+ *
+ * Map a DOS path with a drive letter, X:\dir\file, to the unix path
+ * <config_dir>/dosdevices/x:/dir/file and resolve it with realpath. Returns
+ * NULL if arg is not such a path or the file does not exist.
+ */
+static char *get_dos_drive_unix_path( const char *arg )
+{
+    char drive = arg[0] | 0x20, *path = NULL, *p, *ret;
+
+    if (!config_dir || drive < 'a' || drive > 'z' || arg[1] != ':') return NULL;
+    asprintf( &path, "%s/dosdevices/%c:/%s", config_dir, drive, arg + 2 );
+    if (!path) return NULL;
+    for (p = path + strlen( config_dir ); *p; p++) if (*p == '\\') *p = '/';
+    ret = realpath( path, NULL );
+    free( path );
+    return ret;
+}
+
+/***********************************************************************
+ *           get_first_process_target
+ *
+ * The first process of a launch is given the program to run as its first
+ * argument, arg. build_initial_params runs it directly only if it names an
+ * existing PE file; for anything else, a bare name like "game" or "cmd"
+ * included, it runs the 64-bit start.exe, which starts the program as a child.
+ * Return the real unix path and PE machine of an existing file, given as a
+ * unix path or as a DOS path with a drive letter, and the 64-bit machine for
+ * start.exe. A DOS path that cannot be resolved is returned as given with an
+ * unknown machine.
+ */
+static void get_first_process_target( const char *arg, const char **target, WORD *machine )
+{
+    char *path;
+
+    *target = arg;
+    *machine = IMAGE_FILE_MACHINE_UNKNOWN;
+    if ((path = realpath( arg, NULL )) || (path = get_dos_drive_unix_path( arg )))
+    {
+        *target = path;
+        if (!(*machine = get_pe_file_machine( path ))) *machine = current_machine;
+    }
+    else if (!strchr( arg, '\\' ) && !(arg[0] && arg[1] == ':')) *machine = current_machine;
+}
+
 static void preloader_exec( char **argv, const char *image_path, WORD machine )
 {
     const char *rosetta_path;
@@ -720,22 +884,26 @@ static void preloader_exec( char **argv, const char *image_path, WORD machine )
         replace_wineloader_path_with_link( &(argv[1]), image_path );
 #endif
 
-    /* CW HACK: if ROSETTA_X87_PATH is set, re-exec via rosettax87 so its x87 JIT
-     * hook is installed. Only relevant for i386 targets. Note that argv[1] is
+    /* CW HACK: re-exec i386 processes through the x87sidecar (ROSETTA_X87_PATH,
+     * or the one installed in bin_dir) so its x87 JIT hook is installed, unless
+     * the parent or compatdb.so decided against it. Note that argv[1] is
      * always an existing loader here: get_alternate_wineloader() verifies the
      * path it returns, so loader_exec's speculative first call can't hand us a
      * nonexistent loader that the sidecar would then fail to exec. */
-    if (machine == IMAGE_FILE_MACHINE_I386 && (rosetta_path = getenv( "ROSETTA_X87_PATH" )))
+    if (!compat_x87) rosetta_path = NULL;
+    else if (compat_x87_sidecar[0]) rosetta_path = compat_x87_sidecar;  /* chosen by the parent */
+    else rosetta_path = get_x87_sidecar_path();
+    if (machine == IMAGE_FILE_MACHINE_I386 && rosetta_path)
     {
-        /* image_path is the wine binary in the early reexec_loader path; try to find
-         * the real Windows EXE in argv, both for a more useful log message and to
-         * check its actual architecture. The machine parameter can't be trusted for
-         * that: reexec_loader forces it to i386 on every launch (to probe for a
-         * 32-bit loader), including launches of 64-bit targets. When the target's
-         * PE header is readable and says it isn't i386, skip the sidecar. When it
-         * isn't readable (builtin name, DOS path from exec_wineloader), fall back
-         * to the machine parameter, which is authoritative in the
-         * exec_wineloader path. */
+        /* Find the Windows EXE in argv, for the log message and to check its
+         * architecture. In a child started by spawn_process argv holds the
+         * Windows command line, the parent has already decided from the image
+         * (compat_x87 is 0 or 1), and the machine parameter is authoritative,
+         * so a target that cannot be read here (a DOS path, a builtin) counts
+         * as i386. In the first process of a launch the machine parameter is
+         * always i386, because reexec_loader probes for a 32-bit loader, so the
+         * target is determined again below from the first argument. A target
+         * whose PE header says it is not i386 never gets the sidecar. */
         const char *target = image_path;
         WORD target_machine = IMAGE_FILE_MACHINE_UNKNOWN;
         int i;
@@ -750,16 +918,33 @@ static void preloader_exec( char **argv, const char *image_path, WORD machine )
                 break;
             }
         }
+        if (compat_x87 == -1 && argv[2])
+        {
+            /* The first process of a launch, which no parent has decided for. It
+             * runs the program named by its first argument, or start.exe, which
+             * can differ from the first .exe in argv (wine start /unix game.exe
+             * runs start.exe). Nothing 64-bit needs the sidecar; otherwise ask
+             * compatdb.so, and attach unless it says no. */
+            get_first_process_target( argv[2], &target, &target_machine );
+            if (target_machine == IMAGE_FILE_MACHINE_UNKNOWN ||
+                target_machine == IMAGE_FILE_MACHINE_I386)
+            {
+                compat_x87 = query_compatdb_x87_preinit( target ) ? 1 : 0;
+                if (!compat_x87) WARN( "compatdb.so keeps the x87sidecar away from %s\n", target );
+            }
+        }
         /* Always run the sidecar in cooperative mode: it attaches via a
          * voluntary task-port handshake (performed by x87_cooperative_handshake()
          * in the re-exec'd tracee) instead of task_for_pid + ptrace, so the
          * sidecar needs no get-task-allow entitlement and the bundle stays
          * notarizable. Insert "--cooperative" as the first sidecar argument:
          * [rosettax87, --cooperative, loader, ...]. */
-        if (target_machine == IMAGE_FILE_MACHINE_UNKNOWN ||
-            target_machine == IMAGE_FILE_MACHINE_I386)
+        if (compat_x87 &&
+            (target_machine == IMAGE_FILE_MACHINE_UNKNOWN ||
+             target_machine == IMAGE_FILE_MACHINE_I386))
         {
             static char coop_flag[] = "--cooperative";
+            const char *env_path;
             char **coop_argv;
             int n;
 
@@ -770,7 +955,9 @@ static void preloader_exec( char **argv, const char *image_path, WORD machine )
             coop_argv[0] = strdup( rosetta_path );
             coop_argv[1] = coop_flag;
             for (i = 1; i <= n; i++) coop_argv[i + 1] = argv[i]; /* copies argv[1..] + NULL terminator */
-            ERR( "ROSETTA_X87_PATH: attaching rosettax87 --cooperative (%s) for %s\n",
+            env_path = getenv( "ROSETTA_X87_PATH" );
+            ERR( "%s: attaching rosettax87 --cooperative (%s) for %s\n",
+                 env_path && !strcmp( env_path, rosetta_path ) ? "ROSETTA_X87_PATH" : "x87sidecar",
                  rosetta_path, target );
             execv( coop_argv[0], coop_argv );
         }
@@ -1413,12 +1600,23 @@ static BOOL sonoma_or_later(void)
 
 static void init_non_native_support(void)
 {
-    char *libd3dshared_path = getenv( "CX_APPLEGPTK_LIBD3DSHARED_PATH" );
+    char *libd3dshared_path = getenv( "CX_APPLEGPTK_LIBD3DSHARED_PATH" ), *default_path = NULL;
 
     register_non_native_code_region = NULL;
     supports_non_native_code_regions = NULL;
 
-    if (!libd3dshared_path || !sonoma_or_later())
+    if (!sonoma_or_later())
+        return;
+
+    /* Fall back to the copy shipped beside the D3DMetal framework in our own
+     * tree, so that a self-contained bundle needs no environment setup. The
+     * dylib is loaded either way as the unix half of the D3DMetal builtins,
+     * but only loading it here records the __TEXT range that the unix call
+     * dispatcher needs to spot calls arriving from Apple code. */
+    if (!libd3dshared_path && ntdll_dir)
+        libd3dshared_path = default_path = build_path( ntdll_dir, "../../external/libd3dshared.dylib" );
+
+    if (!libd3dshared_path)
         return;
 
     non_native_support_lib = dlopen( libd3dshared_path, RTLD_LOCAL );
@@ -1443,6 +1641,8 @@ static void init_non_native_support(void)
     }
     else
         TRACE( "Loading libd3dshared.dylib failed: %s\n", dlerror() );
+
+    free( default_path );
 }
 
 static NTSTATUS pe_module_loaded( void *args )
@@ -2306,6 +2506,24 @@ static void hook(void *to_hook, const void *replace)
 }
 #endif
 
+static void *compatdb;
+
+/***********************************************************************
+ *           query_compatdb_x87
+ *
+ * Ask the compatdb.so loaded in this process whether the x87sidecar should
+ * run the executable at unix_path. Returns 1 for yes, 0 for no, -1 if the
+ * library has no opinion or is not loaded.
+ */
+int query_compatdb_x87( const char *unix_path )
+{
+    static int (*query)( const char * );
+
+    if (!compatdb) return -1;
+    if (!query && !(query = dlsym( compatdb, "compatdb_query_x87" ))) return -1;
+    return query( unix_path );
+}
+
 /***********************************************************************
  *           start_main_thread
  */
@@ -2338,18 +2556,21 @@ static void start_main_thread(void)
 
     /* CW Hack 24067 */
     {
-        void *cxcompatdb = NULL;
         char *name = NULL;
 
-        asprintf( &name, "%s/cxcompatdb.so", ntdll_dir );
+        asprintf( &name, "%s/compatdb.so", ntdll_dir );
         if (name)
         {
-            cxcompatdb = dlopen( name, RTLD_LOCAL | RTLD_LAZY );
-            if (!cxcompatdb)
-                WARN( "error loading cxcompatdb.so: %s\n", dlerror() );
+            compatdb = dlopen( name, RTLD_LOCAL | RTLD_LAZY );
+            if (!compatdb)
+                WARN( "error loading compatdb.so: %s\n", dlerror() );
             free(name);
         }
     }
+
+    /* compatdb.so may have forced large address awareness, directly or through
+     * WINE_LARGE_ADDRESS_AWARE, after init_peb made the first decision. */
+    virtual_recheck_large_address_space();
 
     server_init_process_done();
 }
