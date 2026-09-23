@@ -733,7 +733,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
             NSInteger origLevel = [window level];
             NSInteger newLevel = [window minimumLevelForActive:active];
 
-            if (window.floating)
+            /* The Dock is hidden while a window covers the screen. */
+            if (window.floating && !window.fullscreen)
             {
                 if (minFloatingLevel <= maxNonfloatingLevel)
                     minFloatingLevel = maxNonfloatingLevel + 1;
@@ -808,6 +809,37 @@ static NSString* WineLocalizedString(unsigned int stringID)
                     [window setLevel:newLevel];
             }
         }
+
+        [self updateFullscreenPresentation:active];
+    }
+
+    /* While the application is active and a visible window covers the screen
+       with the menu bar, hide the Dock and menu bar.  macOS restores them for
+       other applications on its own. */
+    - (void) updateFullscreenPresentation:(BOOL)active
+    {
+        NSApplicationPresentationOptions current = [NSApp presentationOptions];
+        NSApplicationPresentationOptions options = NSApplicationPresentationDefault;
+        WineWindow* window;
+
+        /* AppKit owns the options of a window in native fullscreen. */
+        if (current & NSApplicationPresentationFullScreen) return;
+
+        if (active && ![self areDisplaysCaptured])
+        {
+            for (window in [NSApp windows])
+            {
+                if ([window isKindOfClass:[WineWindow class]] && [window isVisible] &&
+                    ![window isMiniaturized] && [window isOnActiveSpace] && [window coversMenuBarScreen])
+                {
+                    options = NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
+                    break;
+                }
+            }
+        }
+
+        if (options != current)
+            [NSApp setPresentationOptions:options];
     }
 
     - (void) adjustWindowLevels
