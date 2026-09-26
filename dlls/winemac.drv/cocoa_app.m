@@ -1138,20 +1138,15 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
     - (void) hideCursor
     {
-        if (!clientWantsCursorHidden)
-        {
-            clientWantsCursorHidden = TRUE;
-            [self updateCursor:TRUE];
-        }
+        /* Another process may have replaced the native cursor since the last request. */
+        clientWantsCursorHidden = TRUE;
+        [self updateCursor:TRUE];
     }
 
     - (void) unhideCursor
     {
-        if (clientWantsCursorHidden)
-        {
-            clientWantsCursorHidden = FALSE;
-            [self updateCursor:FALSE];
-        }
+        clientWantsCursorHidden = FALSE;
+        [self updateCursor:FALSE];
     }
 
     - (void) setCursor:(NSCursor*)newCursor
@@ -1516,6 +1511,18 @@ static NSString* WineLocalizedString(unsigned int stringID)
         macdrv_release_event(event);
     }
 
+    /* A stationary pointer has no mouse event to refresh its target on activation. */
+    - (WineWindow*) mouseTargetWindowAtPoint:(NSPoint)point
+    {
+        NSInteger number = [NSWindow windowNumberAtPoint:point belowWindowWithWindowNumber:0];
+        WineWindow* window = (WineWindow*)[NSApp windowWithWindowNumber:number];
+
+        if (![window isKindOfClass:[WineWindow class]] ||
+            !NSMouseInRect(point, [window contentRectForFrameRect:[window frame]], NO))
+            return nil;
+        return window;
+    }
+
     - (void) handleMouseMove:(NSEvent*)anEvent
     {
         WineWindow* targetWindow;
@@ -1535,13 +1542,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
                cursor and post the event as being for that window. */
             CGPoint cgpoint = CGEventGetLocation([anEvent CGEvent]);
             NSPoint point = [self flippedMouseLocation:NSPointFromCGPoint(cgpoint)];
-            NSInteger windowUnderNumber;
-
-            windowUnderNumber = [NSWindow windowNumberAtPoint:point
-                                  belowWindowWithWindowNumber:0];
-            targetWindow = (WineWindow*)[NSApp windowWithWindowNumber:windowUnderNumber];
-            if (!NSMouseInRect(point, [targetWindow contentRectForFrameRect:[targetWindow frame]], NO))
-                targetWindow = nil;
+            targetWindow = [self mouseTargetWindowAtPoint:point];
         }
 
         if ([targetWindow isKindOfClass:[WineWindow class]])
@@ -2540,6 +2541,24 @@ static NSString* WineLocalizedString(unsigned int stringID)
         // movement deltas are invalidated.  Make sure the next mouse move event
         // starts over from an absolute baseline.
         forceNextMouseMoveAbsolute = TRUE;
+
+        /* Refresh Wine's cursor target even when activation produces no mouse movement. */
+        NSPoint mouseLocation = [NSEvent mouseLocation];
+        lastTargetWindow = [self mouseTargetWindowAtPoint:mouseLocation];
+        if (lastTargetWindow)
+        {
+            CGPoint point = NSPointToCGPoint([self flippedMouseLocation:mouseLocation]);
+            if (self.clippingCursor)
+                [clipCursorHandler clipCursorLocation:&point];
+            point = cgpoint_win_from_mac(point);
+            macdrv_event* event = macdrv_create_event(MOUSE_MOVED_ABSOLUTE, lastTargetWindow);
+            event->mouse_moved.x = floor(point.x);
+            event->mouse_moved.y = floor(point.y);
+            event->mouse_moved.time_ms = [self ticksForEventTime:[[NSProcessInfo processInfo] systemUptime]];
+            [lastTargetWindow.queue postEvent:event];
+            macdrv_release_event(event);
+        }
+        [self updateCursor:FALSE];
     }
 
     /* The parts of the screen configuration that Wine's view of the displays
