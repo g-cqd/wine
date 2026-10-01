@@ -1167,10 +1167,10 @@ static BOOL tf_prepare( CONTEXT *context, BOOL completed )
     struct amd64_thread_data *data = tf_thread_data();
     UINT64 addresses[4];
     DWORD reason;
-    unsigned int i, length;
-    BYTE opcode;
-    UINT64 value, stack;
-    BOOL old_tf;
+    unsigned int i, j, length, width;
+    BYTE opcode, prefix;
+    UINT64 value, stack, mask;
+    BOOL old_tf, opsize16, rex_w;
 
     if (!data) return FALSE;
     addresses[0] = data->dr0;
@@ -1215,34 +1215,55 @@ static BOOL tf_prepare( CONTEXT *context, BOOL completed )
             data->tf_state = TF_CARRIER | ((context->EFlags & 0x100) ? TF_EXPECT_BS : 0);
             return FALSE;
         }
-        if (length != 1) TF_STOP("prefixed-flag-instruction-unsupported");
+        /* PUSHF/POPF accept prefixes, and obfuscated code emits them as padding, so the
+         * operand size has to be decoded rather than assumed.  In 64-bit mode these
+         * instructions default to a 64-bit operand size; only 66H changes that, selecting
+         * the 16-bit PUSHFW/POPFW forms.  Segment overrides, 67H and F2H/F3H have no
+         * architectural effect on a stack access here, and REX is absorbed by the default
+         * 64-bit size.  Only the REX that immediately precedes the opcode is effective.
+         * LOCK is #UD on these opcodes, and 66H with REX.W has conflicting documented
+         * precedence, so both keep stopping rather than guessing at the semantics. */
+        opsize16 = FALSE;
+        for (j = 0; j + 1 < length; ++j)
+        {
+            prefix = tf_code_byte( context->Rip, j );
+            if (prefix == 0xf0) TF_STOP("locked-flag-instruction-unsupported");
+            if (prefix == 0x66) opsize16 = TRUE;
+        }
+        prefix = length > 1 ? tf_code_byte( context->Rip, length - 2 ) : 0;
+        rex_w = (prefix >= 0x40 && prefix <= 0x4f) && (prefix & 8);
+        if (opsize16 && rex_w) TF_STOP("flag-operand-size-ambiguous-unsupported");
+        width = opsize16 ? 2 : 8;
+        mask = opsize16 ? 0x4dd5 : 0x244dd5;
         old_tf = !!(context->EFlags & 0x100);
         stack = context->Rsp;
         if (opcode == 0x9c)
         {
-            if (stack < 8) TF_STOP("flag-stack-address-unsupported");
-            stack -= 8;
+            if (stack < width) TF_STOP("flag-stack-address-unsupported");
+            stack -= width;
         }
-        if (stack >= 0x0000800000000000 - 8 ||
-            ((context->EFlags & 0x40000) && (stack & 7)))
+        if (stack >= 0x0000800000000000 - width ||
+            ((context->EFlags & 0x40000) && (stack & (width - 1))))
             TF_STOP("flag-stack-address-unsupported");
         if (opcode == 0x9c)
         {
             value = context->EFlags & ~(UINT64)(0x10000 | 0x20000);
-            if (virtual_uninterrupted_write_memory( (void *)stack, &value, sizeof(value) ))
+            if (virtual_uninterrupted_write_memory( (void *)stack, &value, width ))
                 TF_STOP("flag-stack-write-fault-unsupported");
             context->Rsp = stack;
         }
         else
         {
-            if (virtual_uninterrupted_read_memory( (void *)stack, &value, sizeof(value) ) != sizeof(value))
+            value = 0;
+            if (virtual_uninterrupted_read_memory( (void *)stack, &value, width ) != width)
                 TF_STOP("flag-stack-read-fault-unsupported");
             if (value & 0x4000) TF_STOP("popfq-nt-unsupported");
-            /* CPL 3, IOPL 0: IF/IOPL/VM/VIF/VIP and reserved bits retain their values. */
-            context->EFlags = ((context->EFlags & ~0x244dd5) | (value & 0x244dd5)) | 2;
-            context->Rsp += 8;
+            /* CPL 3, IOPL 0: IF/IOPL/VM/VIF/VIP and reserved bits retain their values.
+             * POPFW leaves everything above bit 15 untouched. */
+            context->EFlags = ((context->EFlags & ~mask) | (value & mask)) | 2;
+            context->Rsp += width;
         }
-        context->Rip++;
+        context->Rip += length;
         context->EFlags &= ~0x10000;
         if (old_tf) return tf_debug_event( context, 0x4000 );
     }
