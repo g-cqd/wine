@@ -529,8 +529,26 @@ static inline struct amd64_thread_data *amd64_thread_data(void)
 
 /* Initialized before signal handlers can inspect the diagnostic mode. */
 static BOOL tf_emulation;
-static unsigned int tf_max_steps = 250000;
+/* Artificial diagnostic budgets, overridable at init; 0 disables the respective limit. */
+static UINT64 tf_max_steps = 250000;        /* WINE_TF_MAX_STEPS */
+static UINT64 tf_max_ns = 5000000000;       /* WINE_TF_MAX_NS */
 static DWORD tf_guest_flags( DWORD physical );
+
+#ifdef __APPLE__
+/* Read a decimal budget once at init, like WINE_TF_EMULATION; unset or unparseable keeps the default. */
+static UINT64 tf_env_budget( const char *name, UINT64 def )
+{
+    const char *mode = getenv( name );
+    UINT64 limit = 0;
+    unsigned int digits = 0;
+
+    if (!mode) return def;
+    while (*mode >= '0' && *mode <= '9' && digits++ < 19)
+        limit = limit * 10 + *mode++ - '0';
+    if (*mode || !digits) return def;
+    return limit;
+}
+#endif
 
 /* Every thread reaching these paths has a TEB here, the same assumption the
  * surrounding amd64_thread_data() users already make. */
@@ -1102,8 +1120,9 @@ static void tf_budget(void)
     if (clock_gettime( CLOCK_MONOTONIC, &now )) TF_STOP("clock-unavailable");
     ns = (UINT64)now.tv_sec * 1000000000 + now.tv_nsec;
     if (!data->tf_started) data->tf_started = ns;
-    if (++data->tf_steps > tf_max_steps) TF_STOP("instruction-budget");
-    if (ns - data->tf_started > 5000000000) TF_STOP("elapsed-budget");
+    ++data->tf_steps;
+    if (tf_max_steps && data->tf_steps > tf_max_steps) TF_STOP("instruction-budget");
+    if (tf_max_ns && ns - data->tf_started > tf_max_ns) TF_STOP("elapsed-budget");
     if (NtCurrentTeb()->Peb->BeingDebugged) TF_STOP("debugger-unsupported");
 }
 
@@ -3280,13 +3299,10 @@ void signal_init_process(void)
         const char *mode = getenv( "WINE_TF_EMULATION" );
 
         tf_emulation = mode && !strcmp( mode, "1" ) && is_rosetta2 && !wow_teb;
-        if (tf_emulation && (mode = getenv( "WINE_TF_MAX_STEPS" )))
+        if (tf_emulation)
         {
-            unsigned int limit = 0, digits = 0;
-            while (*mode >= '0' && *mode <= '9' && digits++ < 6)
-                limit = limit * 10 + *mode++ - '0';
-            if (*mode || !digits || !limit || limit > tf_max_steps) TF_STOP("invalid-instruction-budget");
-            tf_max_steps = limit;
+            tf_max_steps = tf_env_budget( "WINE_TF_MAX_STEPS", tf_max_steps );
+            tf_max_ns = tf_env_budget( "WINE_TF_MAX_NS", tf_max_ns );
         }
     }
 #endif
