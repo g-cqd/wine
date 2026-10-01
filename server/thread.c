@@ -140,7 +140,13 @@ struct context
 #define CTX_WOW     1  /* context if thread is inside WoW */
 
 /* flags for registers that always need to be set from the server side */
-static const unsigned int system_flags = SERVER_CTX_DEBUG_REGISTERS;
+static unsigned int get_system_flags( const struct thread *thread )
+{
+#ifdef __APPLE__
+    if (thread->process->machine == IMAGE_FILE_MACHINE_AMD64 && tf_debug_context_enabled()) return 0;
+#endif
+    return SERVER_CTX_DEBUG_REGISTERS;
+}
 
 static void dump_context( struct object *obj, int verbose );
 static struct object *context_get_sync( struct object *obj );
@@ -407,6 +413,9 @@ static inline void init_thread_structure( struct thread *thread )
     thread->teb             = 0;
     thread->entry_point     = 0;
     thread->system_regs     = 0;
+#ifdef __APPLE__
+    memset( thread->rosetta_debug_regs, 0, sizeof(thread->rosetta_debug_regs) );
+#endif
     thread->queue           = NULL;
     thread->wait            = NULL;
     thread->error           = 0;
@@ -1979,7 +1988,7 @@ DECL_HANDLER(select)
         if (native_context)
         {
             copy_context( &ctx->regs[CTX_NATIVE], native_context,
-                          native_context->flags & ~(ctx->regs[CTX_NATIVE].flags | system_flags) );
+                          native_context->flags & ~(ctx->regs[CTX_NATIVE].flags | get_system_flags( current )) );
         }
         if (wow_context)
         {
@@ -2047,7 +2056,7 @@ DECL_HANDLER(select)
         {
             union apc_call *data;
             data_size_t size = sizeof(*data) + (ctx->regs[CTX_WOW].flags ? 2 : 1) * sizeof(struct context_data);
-            unsigned int flags = system_flags & ctx->regs[CTX_NATIVE].flags;
+            unsigned int flags = get_system_flags( current ) & ctx->regs[CTX_NATIVE].flags;
 
             if (flags) set_thread_context( current, &ctx->regs[CTX_NATIVE], flags );
             size = min( size, get_reply_max_size() );
@@ -2230,8 +2239,8 @@ DECL_HANDLER(get_thread_context)
             if (thread->context)
             {
                 /* make sure that system regs are valid in thread context */
-                if (thread->unix_tid != -1 && (system_flags & ~thread->context->regs[CTX_NATIVE].flags))
-                    get_thread_context( thread, &thread->context->regs[CTX_NATIVE], system_flags );
+                if (thread->unix_tid != -1 && (get_system_flags( thread ) & ~thread->context->regs[CTX_NATIVE].flags))
+                    get_thread_context( thread, &thread->context->regs[CTX_NATIVE], get_system_flags( thread ) );
                 if (!get_error()) thread_context = (struct context *)grab_object( thread->context );
             }
             else if (!get_error() && (context = set_reply_data_size( sizeof(struct context_data) )))
@@ -2239,7 +2248,7 @@ DECL_HANDLER(get_thread_context)
                 assert( reply->self );
                 memset( context, 0, sizeof(struct context_data) );
                 context->machine = native_machine;
-                if (system_flags) get_thread_context( thread, context, system_flags );
+                if (get_system_flags( thread )) get_thread_context( thread, context, get_system_flags( thread ) );
             }
         }
         release_object( thread );
@@ -2305,7 +2314,7 @@ DECL_HANDLER(set_thread_context)
         set_error( STATUS_INVALID_PARAMETER );
     else if (thread->state != TERMINATED)
     {
-        unsigned int flags = system_flags & contexts[CTX_NATIVE].flags;
+        unsigned int flags = get_system_flags( thread ) & contexts[CTX_NATIVE].flags;
 
         if (thread != current) stop_thread( thread );
         else if (flags) set_thread_context( thread, &contexts[CTX_NATIVE], flags );

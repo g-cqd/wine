@@ -35,6 +35,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <time.h>
 #ifdef HAVE_MACHINE_SYSARCH_H
 # include <machine/sysarch.h>
 #endif
@@ -508,6 +509,10 @@ struct amd64_thread_data
     void                **instrumentation_callback; /* 0330 */
     DWORD                 fs;            /* 0338 WOW TEB selector */
     DWORD                 mxcsr;         /* 033c Unix-side mxcsr register */
+    DWORD                 tf_state;      /* private diagnostic carrier state */
+    DWORD                 tf_guest_flags;
+    UINT64                tf_started;
+    UINT64                tf_steps;
 };
 
 C_ASSERT( sizeof(struct amd64_thread_data) <= sizeof(((struct ntdll_thread_data *)0)->cpu_data) );
@@ -520,6 +525,25 @@ C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct amd64_thread_data, mxc
 static inline struct amd64_thread_data *amd64_thread_data(void)
 {
     return (struct amd64_thread_data *)ntdll_get_thread_data()->cpu_data;
+}
+
+/* Initialized before signal handlers can inspect the diagnostic mode. */
+static BOOL tf_emulation;
+static unsigned int tf_max_steps = 250000;
+static DWORD tf_guest_flags( DWORD physical );
+
+/* Every thread reaching these paths has a TEB here, the same assumption the
+ * surrounding amd64_thread_data() users already make. */
+static struct amd64_thread_data *tf_thread_data(void)
+{
+    if (!tf_emulation) return NULL;
+    return amd64_thread_data();
+}
+
+static void tf_reset_thread( struct amd64_thread_data *data )
+{
+    data->tf_state = data->tf_guest_flags = 0;
+    data->tf_started = data->tf_steps = 0;
 }
 
 static unsigned int frame_size;
@@ -983,7 +1007,7 @@ static void save_context( struct xcontext *xcontext, const ucontext_t *sigcontex
     context->Rip    = RIP_sig(sigcontext);
     context->SegCs  = CS_sig(sigcontext);
     context->SegFs  = FS_sig(sigcontext);
-    context->EFlags = EFL_sig(sigcontext);
+    context->EFlags = tf_guest_flags( EFL_sig(sigcontext) );
     context->SegDs  = ds64_sel;
     context->SegEs  = ds64_sel;
     context->SegGs  = ds64_sel;
@@ -1055,14 +1079,196 @@ static void fixup_frame_fpu_state( struct syscall_frame *frame, const ucontext_t
 }
 
 
+/* Stop explicitly at the unsupported boundaries recognized by this finite decoder. */
+#define TF_CARRIER 1
+#define TF_BOUNDARY 2
+#define TF_EXPECT_BS 4
+#define TF_GUEST_BITS (0x100 | 0x10000)
+#define TF_STOP(reason) tf_stop( "TFEMU STOP " reason "\n", sizeof("TFEMU STOP " reason "\n") - 1 )
+
+static void DECLSPEC_NORETURN tf_stop( const char *message, size_t size )
+{
+    write( STDERR_FILENO, message, size );
+    _exit( 86 );
+}
+
+static void tf_budget(void)
+{
+    struct amd64_thread_data *data = tf_thread_data();
+    struct timespec now;
+    UINT64 ns;
+
+    if (!data) return;
+    if (clock_gettime( CLOCK_MONOTONIC, &now )) TF_STOP("clock-unavailable");
+    ns = (UINT64)now.tv_sec * 1000000000 + now.tv_nsec;
+    if (!data->tf_started) data->tf_started = ns;
+    if (++data->tf_steps > tf_max_steps) TF_STOP("instruction-budget");
+    if (ns - data->tf_started > 5000000000) TF_STOP("elapsed-budget");
+    if (NtCurrentTeb()->Peb->BeingDebugged) TF_STOP("debugger-unsupported");
+}
+
+static DWORD tf_guest_flags( DWORD physical )
+{
+    struct amd64_thread_data *data = tf_thread_data();
+    if (data && (data->tf_state & TF_CARRIER))
+        return (physical & ~TF_GUEST_BITS) | data->tf_guest_flags;
+    return physical;
+}
+
+static BYTE tf_code_byte( UINT64 rip, unsigned int offset )
+{
+    BYTE value;
+    if (offset >= 15 || rip >= 0x0000800000000000 - offset ||
+        !virtual_read_executable_byte( (void *)(rip + offset), &value ))
+        TF_STOP("instruction-fetch-fault-unsupported");
+    return value;
+}
+
+static BOOL tf_prefix( BYTE byte )
+{
+    return (byte >= 0x40 && byte <= 0x4f) || byte == 0x66 || byte == 0x67 ||
+           byte == 0xf0 || byte == 0xf2 || byte == 0xf3 || byte == 0x2e ||
+           byte == 0x36 || byte == 0x3e || byte == 0x26 || byte == 0x64 || byte == 0x65;
+}
+
+static BOOL tf_debug_event( CONTEXT *context, DWORD reason )
+{
+    struct amd64_thread_data *data = tf_thread_data();
+    if (!data) return FALSE;
+    /* Intel permits B0-B3 replacement; BS/BD/BT remain sticky until software clears them. */
+    data->dr6 = (data->dr6 & ~(UINT64)0xf) | reason;
+    context->Dr6 = data->dr6;
+    data->tf_state = 0;
+    return TRUE;
+}
+
+/* Returns TRUE for a real guest debug exception, leaving architectural RIP unchanged. */
+static BOOL tf_prepare( CONTEXT *context, BOOL completed )
+{
+    struct amd64_thread_data *data = tf_thread_data();
+    UINT64 addresses[4];
+    DWORD reason;
+    unsigned int i, length;
+    BYTE opcode;
+    UINT64 value, stack;
+    BOOL old_tf;
+
+    if (!data) return FALSE;
+    addresses[0] = data->dr0;
+    addresses[1] = data->dr1;
+    addresses[2] = data->dr2;
+    addresses[3] = data->dr3;
+    if (completed)
+    {
+        context->EFlags &= ~0x10000;
+        if (data->tf_state & TF_EXPECT_BS) return tf_debug_event( context, 0x4000 );
+    }
+    while ((data->dr7 & 0xff) || (context->EFlags & 0x100))
+    {
+        tf_budget();
+        opcode = tf_code_byte( context->Rip, 0 );
+        if (context->SegCs != cs64_sel || (context->EFlags & (0x4000 | 0x3000)))
+            TF_STOP("mode-or-privilege-unsupported");
+        if (data->dr7 & 0x2000) TF_STOP("debug-general-detect-unsupported");
+        reason = 0;
+        for (i = 0; i < 4; ++i)
+        {
+            if (!((data->dr7 >> (2 * i)) & 3)) continue;
+            if ((data->dr7 >> (16 + 4 * i)) & 15) TF_STOP("non-execution-breakpoint-unsupported");
+            if (addresses[i] == context->Rip && !(context->EFlags & 0x10000)) reason |= 1 << i;
+        }
+        if (reason) return tf_debug_event( context, reason );
+        length = 1;
+        while (tf_prefix( opcode ))
+        {
+            if (length == 15) TF_STOP("instruction-length-unsupported");
+            opcode = tf_code_byte( context->Rip, length++ );
+        }
+        if (opcode == 0x8e && ((tf_code_byte( context->Rip, length ) >> 3) & 7) == 2)
+            TF_STOP("mov-ss-shadow-unsupported");
+        if (opcode == 0x17 || opcode == 0xcf || opcode == 0xcc || opcode == 0xcd || opcode == 0xce || opcode == 0xf1)
+            TF_STOP("control-or-exception-instruction-unsupported");
+        if (opcode == 0x0f && tf_code_byte( context->Rip, length ) == 0xb2)
+            TF_STOP("lss-shadow-unsupported");
+        if (opcode != 0x9c && opcode != 0x9d)
+        {
+            data->tf_guest_flags = context->EFlags & TF_GUEST_BITS;
+            data->tf_state = TF_CARRIER | ((context->EFlags & 0x100) ? TF_EXPECT_BS : 0);
+            return FALSE;
+        }
+        if (length != 1) TF_STOP("prefixed-flag-instruction-unsupported");
+        old_tf = !!(context->EFlags & 0x100);
+        stack = context->Rsp;
+        if (opcode == 0x9c)
+        {
+            if (stack < 8) TF_STOP("flag-stack-address-unsupported");
+            stack -= 8;
+        }
+        if (stack >= 0x0000800000000000 - 8 ||
+            ((context->EFlags & 0x40000) && (stack & 7)))
+            TF_STOP("flag-stack-address-unsupported");
+        if (opcode == 0x9c)
+        {
+            value = context->EFlags & ~(UINT64)(0x10000 | 0x20000);
+            if (virtual_uninterrupted_write_memory( (void *)stack, &value, sizeof(value) ))
+                TF_STOP("flag-stack-write-fault-unsupported");
+            context->Rsp = stack;
+        }
+        else
+        {
+            if (virtual_uninterrupted_read_memory( (void *)stack, &value, sizeof(value) ) != sizeof(value))
+                TF_STOP("flag-stack-read-fault-unsupported");
+            if (value & 0x4000) TF_STOP("popfq-nt-unsupported");
+            /* CPL 3, IOPL 0: IF/IOPL/VM/VIF/VIP and reserved bits retain their values. */
+            context->EFlags = ((context->EFlags & ~0x244dd5) | (value & 0x244dd5)) | 2;
+            context->Rsp += 8;
+        }
+        context->Rip++;
+        context->EFlags &= ~0x10000;
+        if (old_tf) return tf_debug_event( context, 0x4000 );
+    }
+    data->tf_state = 0;
+    return FALSE;
+}
+
+static void tf_set_sigcontext( const CONTEXT *context, ucontext_t *sigcontext )
+{
+    struct amd64_thread_data *data = tf_thread_data();
+    set_sigcontext( context, sigcontext );
+    if (data && (data->tf_state & TF_CARRIER)) EFL_sig(sigcontext) |= 0x100;
+}
+
+static void tf_arm_frame( struct syscall_frame *frame, DWORD flags, const CONTEXT *context )
+{
+    struct amd64_thread_data *data = tf_thread_data();
+    DWORD guest;
+
+    if (!data) return;
+    guest = (flags & CONTEXT_CONTROL) ? context->EFlags : tf_guest_flags( frame->eflags );
+    data->tf_guest_flags = guest & TF_GUEST_BITS;
+    data->tf_state = 0;
+    frame->eflags = guest;
+    if ((data->dr7 & 0xff) || (guest & 0x100))
+    {
+        tf_budget();
+        data->tf_state = TF_CARRIER | TF_BOUNDARY;
+        frame->eflags |= 0x100;
+        frame->restore_flags |= CONTEXT_CONTROL;
+    }
+}
+
+static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec,
+                                   struct xcontext *xcontext );
+
+
 /***********************************************************************
  *           restore_context
  *
  * Build a sigcontext from the register values.
  */
-static void restore_context( const struct xcontext *xcontext, ucontext_t *sigcontext )
+static void restore_context( struct xcontext *xcontext, ucontext_t *sigcontext )
 {
-    const CONTEXT *context = &xcontext->c;
+    CONTEXT *context = &xcontext->c;
 
     amd64_thread_data()->dr0 = context->Dr0;
     amd64_thread_data()->dr1 = context->Dr1;
@@ -1070,7 +1276,14 @@ static void restore_context( const struct xcontext *xcontext, ucontext_t *sigcon
     amd64_thread_data()->dr3 = context->Dr3;
     amd64_thread_data()->dr6 = context->Dr6;
     amd64_thread_data()->dr7 = context->Dr7;
-    set_sigcontext( context, sigcontext );
+    if (tf_prepare( context, FALSE ))
+    {
+        EXCEPTION_RECORD rec = { .ExceptionCode = EXCEPTION_SINGLE_STEP,
+                                 .ExceptionAddress = (void *)context->Rip };
+        setup_raise_exception( sigcontext, &rec, xcontext );
+        return;
+    }
+    tf_set_sigcontext( context, sigcontext );
     if (FPU_sig(sigcontext)) memcpy( FPU_sig(sigcontext), &context->FltSave, sizeof(context->FltSave) );
     leave_handler( sigcontext );
 }
@@ -1134,7 +1347,7 @@ NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
     else flags &= ~CONTEXT_XSTATE;
 
     /* debug registers require a server call */
-    if (self && (flags & CONTEXT_DEBUG_REGISTERS))
+    if (!tf_thread_data() && self && (flags & CONTEXT_DEBUG_REGISTERS))
         self = (amd64_thread_data()->dr0 == context->Dr0 &&
                 amd64_thread_data()->dr1 == context->Dr1 &&
                 amd64_thread_data()->dr2 == context->Dr2 &&
@@ -1154,15 +1367,15 @@ NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
         }
 #endif
         if (ret || !self) return ret;
-        if (flags & CONTEXT_DEBUG_REGISTERS)
-        {
-            amd64_thread_data()->dr0 = context->Dr0;
-            amd64_thread_data()->dr1 = context->Dr1;
-            amd64_thread_data()->dr2 = context->Dr2;
-            amd64_thread_data()->dr3 = context->Dr3;
-            amd64_thread_data()->dr6 = context->Dr6;
-            amd64_thread_data()->dr7 = context->Dr7;
-        }
+    }
+    if (flags & CONTEXT_DEBUG_REGISTERS)
+    {
+        amd64_thread_data()->dr0 = context->Dr0;
+        amd64_thread_data()->dr1 = context->Dr1;
+        amd64_thread_data()->dr2 = context->Dr2;
+        amd64_thread_data()->dr3 = context->Dr3;
+        amd64_thread_data()->dr6 = context->Dr6;
+        amd64_thread_data()->dr7 = context->Dr7;
     }
 
     if (flags & CONTEXT_INTEGER)
@@ -1207,6 +1420,7 @@ NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
     }
 
     frame->restore_flags |= flags & ~CONTEXT_INTEGER;
+    tf_arm_frame( frame, flags, context );
     return STATUS_SUCCESS;
 }
 
@@ -1222,7 +1436,7 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
     BOOL self = (handle == GetCurrentThread());
 
     /* debug registers require a server call */
-    if (needed_flags & CONTEXT_DEBUG_REGISTERS) self = FALSE;
+    if (!tf_thread_data() && (needed_flags & CONTEXT_DEBUG_REGISTERS)) self = FALSE;
 
     if (!self)
     {
@@ -1253,7 +1467,7 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
     {
         context->Rsp    = frame->rsp;
         context->Rip    = frame->rip;
-        context->EFlags = frame->eflags;
+        context->EFlags = tf_guest_flags( frame->eflags );
         context->SegCs  = cs64_sel;
         context->SegSs  = ds64_sel;
         context->ContextFlags |= CONTEXT_CONTROL;
@@ -1333,6 +1547,16 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
             /* copy_xstate may use avx in memcpy, restore xstate not to break the tests. */
             frame->restore_flags |= CONTEXT_XSTATE;
         }
+    }
+    if (tf_thread_data() && (needed_flags & CONTEXT_DEBUG_REGISTERS))
+    {
+        context->Dr0 = amd64_thread_data()->dr0;
+        context->Dr1 = amd64_thread_data()->dr1;
+        context->Dr2 = amd64_thread_data()->dr2;
+        context->Dr3 = amd64_thread_data()->dr3;
+        context->Dr6 = amd64_thread_data()->dr6;
+        context->Dr7 = amd64_thread_data()->dr7;
+        context->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
     }
     /* update the cached version of the debug registers */
     if (needed_flags & CONTEXT_DEBUG_REGISTERS)
@@ -1585,7 +1809,7 @@ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec
     XSAVE_AREA_HEADER *src_xs;
     void *callback;
 
-    if (rec->ExceptionCode == EXCEPTION_SINGLE_STEP)
+    if (rec->ExceptionCode == EXCEPTION_SINGLE_STEP && !tf_thread_data())
     {
         /* when single stepping can't tell whether this is a hw bp or a
          * single step interrupt. try to avoid as much overhead as possible
@@ -1644,6 +1868,14 @@ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec
     {
         R10_sig(sigcontext) = RIP_sig(sigcontext);
         RIP_sig(sigcontext) = (ULONG64)callback;
+    }
+    if (tf_thread_data())
+    {
+        struct xcontext dispatch;
+        amd64_thread_data()->tf_state = 0;
+        save_context( &dispatch, sigcontext );
+        if (tf_prepare( &dispatch.c, FALSE )) TF_STOP("dispatcher-entry-breakpoint-unsupported");
+        tf_set_sigcontext( &dispatch.c, sigcontext );
     }
     leave_handler( sigcontext );
 }
@@ -2501,6 +2733,8 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     EXCEPTION_RECORD rec = { 0 };
     struct xcontext context;
 
+    if (tf_thread_data() && (amd64_thread_data()->tf_state & TF_CARRIER) &&
+        !is_inside_syscall( RSP_sig(ucontext) )) TF_STOP("native-fault-unsupported");
     rec.ExceptionAddress = (void *)RIP_sig(ucontext);
     save_context( &context, ucontext );
 
@@ -2598,6 +2832,8 @@ static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     struct xcontext context;
 
     if (handle_syscall_trap( ucontext, siginfo )) return;
+    if (tf_thread_data() && (amd64_thread_data()->tf_state & TF_CARRIER) &&
+        TRAP_sig(ucontext) != TRAP_x86_TRCTRAP) TF_STOP("non-step-trap-unsupported");
 
     rec.ExceptionAddress = (void *)RIP_sig(ucontext);
     save_context( &context, ucontext );
@@ -2606,6 +2842,26 @@ static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     {
     case TRAP_x86_TRCTRAP:
         rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
+        if (tf_thread_data())
+        {
+            struct amd64_thread_data *amd64_data = amd64_thread_data();
+            BOOL completed = !(amd64_data->tf_state & TF_BOUNDARY);
+            if (!(amd64_data->tf_state & TF_CARRIER))
+            {
+                if (amd64_data->dr7 & 0xff) TF_STOP("unclassified-single-step");
+                /* A guest may set TF with native POPFQ before any breakpoint is armed. */
+                if (EFL_sig(ucontext) & 0x100) tf_debug_event( &context.c, 0x4000 );
+            }
+            else if (!tf_prepare( &context.c, completed ))
+            {
+                tf_set_sigcontext( &context.c, ucontext );
+                leave_handler( ucontext );
+                return;
+            }
+            rec.ExceptionAddress = (void *)context.c.Rip;
+            /* setup_raise_exception() leaves this to us while emulating. */
+            context.c.EFlags &= ~0x100;
+        }
         break;
     case TRAP_x86_BPTFLT:
         rec.ExceptionAddress = (char *)rec.ExceptionAddress - 1;  /* back up over the int3 instruction */
@@ -2631,6 +2887,8 @@ static void fpe_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     EXCEPTION_RECORD rec = { .ExceptionAddress = (void *)RIP_sig(ucontext) };
     struct xcontext context;
 
+    if (tf_thread_data() && (amd64_thread_data()->tf_state & TF_CARRIER))
+        TF_STOP("floating-point-fault-unsupported");
     save_context( &context, sigcontext );
 
     switch (siginfo->si_code)
@@ -2747,6 +3005,7 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *sigcontext )
             return;
         }
         context->c.ContextFlags = CONTEXT_FULL | CONTEXT_SEGMENTS | CONTEXT_EXCEPTION_REQUEST;
+        if (tf_thread_data()) context->c.ContextFlags |= CONTEXT_DEBUG_REGISTERS;
         if (frame->restore_flags & RESTORE_FLAGS_INCOMPLETE_FRAME_CONTEXT)
         {
             frame->restore_flags &= ~RESTORE_FLAGS_INCOMPLETE_FRAME_CONTEXT;
@@ -2821,7 +3080,7 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     frame->restore_flags = 0;
     if (instrumentation_callback) frame->restore_flags |= RESTORE_FLAGS_INSTRUMENTATION;
     RCX_sig(ucontext) = (ULONG_PTR)frame;
-    R11_sig(ucontext) = frame->eflags;
+    R11_sig(ucontext) = tf_guest_flags( frame->eflags );
     if (EFL_sig(ucontext) & 0x100)
     {
         EFL_sig(ucontext) &= ~0x100;  /* clear single-step flag */
@@ -2932,6 +3191,7 @@ NTSTATUS signal_alloc_thread( TEB *teb )
         else thread_data->fs = fs32_sel;
     }
     thread_data->frame_size = frame_size;
+    tf_reset_thread( thread_data );
     return STATUS_SUCCESS;
 }
 
@@ -3014,6 +3274,21 @@ void signal_init_process(void)
     /* CW Hack 23427: __builtin_available presumably isn't signal-safe. */
     if (__builtin_available( macOS 15.0, * ))
         sequoia_or_later = TRUE;
+
+    /* Rosetta status is already cached above; sysctlbyname is not signal-safe. */
+    {
+        const char *mode = getenv( "WINE_TF_EMULATION" );
+
+        tf_emulation = mode && !strcmp( mode, "1" ) && is_rosetta2 && !wow_teb;
+        if (tf_emulation && (mode = getenv( "WINE_TF_MAX_STEPS" )))
+        {
+            unsigned int limit = 0, digits = 0;
+            while (*mode >= '0' && *mode <= '9' && digits++ < 6)
+                limit = limit * 10 + *mode++ - '0';
+            if (*mode || !digits || !limit || limit > tf_max_steps) TF_STOP("invalid-instruction-budget");
+            tf_max_steps = limit;
+        }
+    }
 #endif
 
     sig_act.sa_mask = server_block_set;
@@ -3123,6 +3398,7 @@ void init_syscall_frame( LPTHREAD_START_ROUTINE entry, void *arg, BOOL suspend, 
     ctx = (CONTEXT *)((ULONG_PTR)context.Rsp & ~15) - 1;
     *ctx = context;
     ctx->ContextFlags = CONTEXT_FULL;
+    if (tf_thread_data()) ctx->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
     memset( &frame->xstate, 0, sizeof(frame->xstate) );
     if (user_shared_data->XState.CompactionEnabled)
         frame->xstate.CompactionMask = 0x8000000000000000 | user_shared_data->XState.EnabledFeatures;
@@ -3424,8 +3700,17 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "movq 0x40(%rcx),%r10\n\t"
                    "movq 0x48(%rcx),%r11\n\t"
                    "movq 0x10(%rcx),%rcx\n\t"
+#ifdef __APPLE__
+                   "cmpl $0," __ASM_NAME("tf_emulation") "(%rip)\n\t"
+                   "jz 8f\n\t"
+                   "pushq 16(%rsp)\n\t"
+                   "jmp 9f\n"
+                   "8:\tpushfq\n"
+                   "9:\tandq $~0x4000,(%rsp)\n\t"
+#else
                    "pushfq\n\t"
-                   "andq $~0x4000,(%rsp)\n\t" /* make sure NT flag is not set, or iretq will fault */
+                   "andq $~0x4000,(%rsp)\n\t"
+#endif /* make sure NT flag is not set, or iretq will fault */
                    "popfq\n\t"
                    "iretq\n"
                    /* RESTORE_FLAGS_INSTRUMENTATION */
