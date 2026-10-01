@@ -60,6 +60,9 @@ struct thread
     struct list            mutex_list;    /* list of currently owned mutexes */
     struct list            d3dkmt_mutexes;/* list of currently owned d3dkmt mutexes */
     unsigned int           system_regs;   /* which system regs have been set */
+#ifdef __APPLE__
+    unsigned __int64       rosetta_debug_regs[6]; /* virtual DR0-3, DR6 and DR7, owned by this thread */
+#endif
     struct msg_queue      *queue;         /* message queue */
     struct thread_wait    *wait;          /* current wait condition if sleeping */
     struct list            system_apc;    /* queue of system async procedure calls */
@@ -140,6 +143,9 @@ extern int resume_thread( struct thread *thread );
 
 extern void sigchld_callback(void);
 extern void init_thread_context( struct thread *thread );
+#ifdef __APPLE__
+extern int tf_debug_context_enabled(void);
+#endif
 extern void get_thread_context( struct thread *thread, struct context_data *context, unsigned int flags );
 extern void set_thread_context( struct thread *thread, const struct context_data *context, unsigned int flags );
 extern int send_thread_signal( struct thread *thread, int sig );

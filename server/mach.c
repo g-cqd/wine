@@ -93,6 +93,18 @@ static int is_rosetta( void )
     return rosetta_status;
 }
 
+/* Private diagnostic mode: suspended clients own their DEBUG context. */
+int tf_debug_context_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1)
+    {
+        const char *mode = getenv( "WINE_TF_EMULATION" );
+        enabled = mode && !strcmp( mode, "1" ) && is_rosetta();
+    }
+    return enabled;
+}
+
 extern kern_return_t bootstrap_register2( mach_port_t bp, name_t service_name, mach_port_t sp, uint64_t flags );
 
 /* initialize the process control mechanism */
@@ -191,8 +203,29 @@ void get_thread_context( struct thread *thread, struct context_data *context, un
 
     if (is_rosetta())
     {
-        /* getting debug registers of a translated process is not supported cross-process, return all zeroes */
-        memset( &context->debug, 0, sizeof(context->debug) );
+        /* Keep accepted context writes across suspension; this cache does not deliver breakpoint exceptions. */
+        switch (context->machine)
+        {
+        case IMAGE_FILE_MACHINE_I386:
+            context->debug.i386_regs.dr0 = thread->rosetta_debug_regs[0];
+            context->debug.i386_regs.dr1 = thread->rosetta_debug_regs[1];
+            context->debug.i386_regs.dr2 = thread->rosetta_debug_regs[2];
+            context->debug.i386_regs.dr3 = thread->rosetta_debug_regs[3];
+            context->debug.i386_regs.dr6 = thread->rosetta_debug_regs[4];
+            context->debug.i386_regs.dr7 = thread->rosetta_debug_regs[5];
+            break;
+        case IMAGE_FILE_MACHINE_AMD64:
+            context->debug.x86_64_regs.dr0 = thread->rosetta_debug_regs[0];
+            context->debug.x86_64_regs.dr1 = thread->rosetta_debug_regs[1];
+            context->debug.x86_64_regs.dr2 = thread->rosetta_debug_regs[2];
+            context->debug.x86_64_regs.dr3 = thread->rosetta_debug_regs[3];
+            context->debug.x86_64_regs.dr6 = thread->rosetta_debug_regs[4];
+            context->debug.x86_64_regs.dr7 = thread->rosetta_debug_regs[5];
+            break;
+        default:
+            set_error( STATUS_INVALID_PARAMETER );
+            return;
+        }
         context->flags |= SERVER_CTX_DEBUG_REGISTERS;
         return;
     }
@@ -277,10 +310,29 @@ void set_thread_context( struct thread *thread, const struct context_data *conte
 
     if (is_rosetta())
     {
-        /* Setting debug registers of a translated process is not supported cross-process
-         * (and even in-process, setting debug registers never has the desired effect).
-         */
-        set_error( STATUS_UNSUCCESSFUL );
+        /* The target thread owns this virtual state; no caller-handle cache or hardware support is implied. */
+        switch (context->machine)
+        {
+        case IMAGE_FILE_MACHINE_I386:
+            thread->rosetta_debug_regs[0] = context->debug.i386_regs.dr0;
+            thread->rosetta_debug_regs[1] = context->debug.i386_regs.dr1;
+            thread->rosetta_debug_regs[2] = context->debug.i386_regs.dr2;
+            thread->rosetta_debug_regs[3] = context->debug.i386_regs.dr3;
+            thread->rosetta_debug_regs[4] = context->debug.i386_regs.dr6;
+            thread->rosetta_debug_regs[5] = context->debug.i386_regs.dr7;
+            break;
+        case IMAGE_FILE_MACHINE_AMD64:
+            thread->rosetta_debug_regs[0] = context->debug.x86_64_regs.dr0;
+            thread->rosetta_debug_regs[1] = context->debug.x86_64_regs.dr1;
+            thread->rosetta_debug_regs[2] = context->debug.x86_64_regs.dr2;
+            thread->rosetta_debug_regs[3] = context->debug.x86_64_regs.dr3;
+            thread->rosetta_debug_regs[4] = context->debug.x86_64_regs.dr6;
+            thread->rosetta_debug_regs[5] = context->debug.x86_64_regs.dr7;
+            break;
+        default:
+            set_error( STATUS_INVALID_PARAMETER );
+            break;
+        }
         return;
     }
 

@@ -4893,6 +4893,31 @@ BOOL virtual_check_buffer_for_write( void *ptr, SIZE_T size )
 }
 
 
+/* Read one committed application instruction byte with permissions and data protected by the same lock.
+ * SEC_RESERVE views require a server commitment query and are outside this diagnostic's bounded fetch. */
+BOOL virtual_read_executable_byte( const void *addr, BYTE *value )
+{
+    struct file_view *view;
+    sigset_t sigset;
+    BYTE vprot;
+    BOOL ret = FALSE;
+
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    if ((view = find_view( addr, 1 )) && !(view->protect & (VPROT_SYSTEM | SEC_RESERVE)))
+    {
+        vprot = get_page_vprot( addr );
+        if ((vprot & (VPROT_COMMITTED | VPROT_EXEC | VPROT_GUARD)) == (VPROT_COMMITTED | VPROT_EXEC) &&
+            (get_unix_prot( get_host_page_vprot( addr )) & PROT_READ))
+        {
+            *value = *(const BYTE *)addr;
+            ret = TRUE;
+        }
+    }
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    return ret;
+}
+
+
 /***********************************************************************
  *           virtual_uninterrupted_read_memory
  *
