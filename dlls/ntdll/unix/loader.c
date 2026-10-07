@@ -317,13 +317,36 @@ static char *build_relative_path( const char *base, const char *from, const char
     return ret;
 }
 
+#if defined(__APPLE__) && defined(__aarch64__)
+/* Native arm64: the 4 KiB page size (and the low 4 GiB) exist only in processes created with
+ * posix_spawnattr_set_4k_page_size_np() from an entitled binary, and the attribute is NOT inherited
+ * by fork/exec, posix_spawn without it, or POSIX_SPAWN_SETEXEC. Every spawn or exec of a Wine binary
+ * must therefore go through here. Never use it for system binaries (they fail with EBADMACHO). */
+static int spawn_wine_binary( pid_t *pid, const char *path, char **argv, BOOL setexec )
+{
+    posix_spawnattr_t attr;
+    int ret;
+
+    posix_spawnattr_init( &attr );
+    posix_spawnattr_set_4k_page_size_np( &attr );
+    if (setexec) posix_spawnattr_setflags( &attr, POSIX_SPAWN_SETEXEC );
+    ret = posix_spawn( pid, path, NULL, &attr, argv, environ );
+    posix_spawnattr_destroy( &attr );
+    return ret;
+}
+#endif
+
 /* build a path to a binary and exec it */
 static int build_path_and_exec( pid_t *pid, const char *dir, const char *name, char **argv )
 {
     int ret;
 
     argv[0] = build_path( dir, name );
+#if defined(__APPLE__) && defined(__aarch64__)
+    ret = spawn_wine_binary( pid, argv[0], argv, FALSE );
+#else
     ret = posix_spawn( pid, argv[0], NULL, NULL, argv, environ );
+#endif
     free( argv[0] );
     return ret;
 }
@@ -579,8 +602,8 @@ char *get_alternate_wineloader( WORD machine )
     return ret;
 }
 
-/* CW HACK 22144 */
-#ifdef __APPLE__
+/* CW HACK 22144 (not on arm64: the exec'd path must stay inside the signed bundle that embeds the provisioning profile) */
+#if defined(__APPLE__) && !defined(__aarch64__)
 /* This is the same "exe path to display name" algorithm used in
  * loader/main.c to determine the name used for the application menu (CW hack 13438).
  *
@@ -853,10 +876,12 @@ static void get_first_process_target( const char *arg, const char **target, WORD
 
 static void preloader_exec( char **argv, const char *image_path, WORD machine )
 {
+#ifndef __aarch64__
     const char *rosetta_path;
+#endif
 #ifdef HAVE_WINE_PRELOADER
     asprintf( &argv[0], "%s-preloader", argv[1] );
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(__aarch64__)
     {
         posix_spawnattr_t attr;
 
@@ -874,7 +899,7 @@ static void preloader_exec( char **argv, const char *image_path, WORD machine )
     free( argv[0] );
 #endif
 
-#if defined(__APPLE__) && !defined(HAVE_WINE_PRELOADER)
+#if defined(__APPLE__) && !defined(__aarch64__) && !defined(HAVE_WINE_PRELOADER)
     /* CW HACK 22144: Create and exec a more descriptively-named link to the loader,
      * which will show up as the icon name in the Dock.
      * When the preloader is not being used, WINEDLLPATH needs to be set correctly for
@@ -890,6 +915,7 @@ static void preloader_exec( char **argv, const char *image_path, WORD machine )
      * always an existing loader here: get_alternate_wineloader() verifies the
      * path it returns, so loader_exec's speculative first call can't hand us a
      * nonexistent loader that the sidecar would then fail to exec. */
+#ifndef __aarch64__  /* the Rosetta x87 sidecar is an x86_64 host feature */
     if (!compat_x87) rosetta_path = NULL;
     else if (compat_x87_sidecar[0]) rosetta_path = compat_x87_sidecar;  /* chosen by the parent */
     else rosetta_path = get_x87_sidecar_path();
@@ -962,8 +988,13 @@ static void preloader_exec( char **argv, const char *image_path, WORD machine )
             execv( coop_argv[0], coop_argv );
         }
     }
+#endif
 
+#if defined(__APPLE__) && defined(__aarch64__)
+    spawn_wine_binary( NULL, argv[1], argv + 1, TRUE );  /* POSIX_SPAWN_SETEXEC: only returns on failure */
+#else
     execv( argv[1], argv + 1 );
+#endif
 }
 
 /* exec the appropriate wine loader for the specified machine */
@@ -2919,7 +2950,7 @@ static void check_command_line( int argc, char *argv[] )
 }
 
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(__aarch64__)  /* x86_64 Rosetta sidecar only */
 /* CW HACK: tell the user that the x87sidecar did not install its hook. This is
  * printed unconditionally, so that it shows even with WINEDEBUG=-all. The
  * sidecar prints a banner with the same "RUNNING WITHOUT X87 ACCELERATION" text
@@ -3074,7 +3105,7 @@ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
     main_argc = argc;
     main_argv = argv;
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(__aarch64__)
     /* CW HACK: if we were launched under `x87sidecar --cooperative`, hand our
      * task port to the sidecar and wait for its x87 JIT hook before running. */
     x87_cooperative_handshake();
