@@ -956,6 +956,13 @@ case $host_os in
             WINELOADER_LDFLAGS="$WINELOADER_LDFLAGS -Wl,-no_pie,-image_base,0x200000000,-no_huge,-no_fixup_chains,-segalign,0x1000,-segaddr,WINE_RESERVE,0x1000,-segaddr,WINE_TOP_DOWN,0x7ff000000000"],
            [wine_use_preloader=yes])
         ;;
+      aarch64)
+        dnl Entitled arm64 process (com.apple.developer.cross-architecture-support): the kernel keeps a 1-page
+        dnl hard page zero and maps the rest of the default 4 GiB __PAGEZERO as a soft, replaceable entry, which
+        dnl is the low-4GiB reserve. Smaller -pagezero_size values or -segalign 0x1000 break the arm64 load.
+        wine_use_preloader=no
+        WINELOADER_LDFLAGS="-Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist -Wl,-x86_64_layout_emulation"
+        ;;
       *)    wine_use_preloader=no ;;
     esac
 
