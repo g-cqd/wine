@@ -144,12 +144,23 @@ static void stub_syscall( const char *name )
 #define SYSCALL_STUB(name) static void name(void) { stub_syscall( #name ); }
 ALL_SYSCALL_STUBS
 
+#if defined(__APPLE__) && defined(__aarch64__)
+/* The PE side passes stack arguments in 8-byte slots (Windows ARM64 ABI), Apple's ABI packs small ones:
+ * syscalls with more than 8 arguments go through adapters taking 64-bit slots (scripts/gen-apple-stack-thunks.py) */
+# include "apple_stack_thunks.h"
+# include "apple_stack_thunks_rename.h"
+#endif
+
 static void * const syscalls[] =
 {
 #define SYSCALL_ENTRY(id,name,args) name,
     ALL_SYSCALLS
 #undef SYSCALL_ENTRY
 };
+
+#if defined(__APPLE__) && defined(__aarch64__)
+# include "apple_stack_thunks_unrename.h"
+#endif
 
 static BYTE syscall_args[ARRAY_SIZE(syscalls)] =
 {
