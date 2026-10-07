@@ -399,9 +399,11 @@ void macdrv_handle_event(const macdrv_event *event)
     case APP_QUIT_REQUESTED:
         macdrv_app_quit_requested(event);
         break;
+#if defined(__x86_64__)  /* D3DMetal hooks (d3dmetal.c) exist only for x86_64 */
     case CLIENT_SURFACE_PRESENTED:    /* CW HACK 22435 */
 	macdrv_client_surface_presented(event);
 	break;
+#endif
     case DISPLAYS_CHANGED:
         macdrv_displays_changed(event);
         break;
