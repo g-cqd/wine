@@ -124,6 +124,52 @@ static DWORD64 get_fault_esr( ucontext_t *sigcontext )
 
 #endif /* linux */
 
+#ifdef __APPLE__
+/* macOS arm64: x18 is reserved by the OS and zeroed on every syscall, interrupt and context switch, unless the
+ * thread is in the "custom x18 ABI" mode (os_set_custom_x18_abi_enabled(), macOS 26.4+, needs the
+ * com.apple.developer.cross-architecture-support entitlement). Wine therefore runs PE code with that mode
+ * on (x18 = TEB) and Unix code with it off (the TEB comes from the pthread TSD, see NtCurrentTeb in
+ * thread.c). The mode is toggled in the syscall/unix-call dispatchers, call_user_mode_callback and the
+ * signal handlers below; every toggle must change the state (a redundant toggle aborts the process). */
+extern void os_set_custom_x18_abi_enabled( _Bool custom );
+extern _Bool os_custom_x18_abi_enabled(void);
+# define X18_ABI_CALL(on) "mov w0, #" #on "\n\t" "bl " __ASM_NAME("os_set_custom_x18_abi_enabled") "\n\t"
+# define X18_PE_MODE_ENTER  X18_ABI_CALL(1)   /* clobbers x0-x17 */
+# define X18_UNIX_MODE_ENTER X18_ABI_CALL(0)  /* clobbers x0-x17 and x18 */
+# define SYSCALL_TEB_REG "x24"                /* where the dispatcher keeps the TEB while in Unix mode */
+/* leave PE mode while keeping the syscall arguments (x0-x8) and the TEB */
+# define X18_UNIXCALL_ENTRY \
+    "stp x0, x1, [sp, #-0x20]!\n\t" \
+    "str x2, [sp, #0x10]\n\t" \
+    X18_UNIX_MODE_ENTER \
+    "ldr x2, [sp, #0x10]\n\t" \
+    "ldp x0, x1, [sp], #0x20\n\t"
+# define X18_UNIXCALL_EXIT \
+    "stp x0, x1, [sp, #-0x10]!\n\t" \
+    X18_PE_MODE_ENTER \
+    "ldp x0, x1, [sp], #0x10\n\t"
+# define X18_SYSCALL_ENTRY \
+    "mov x24, x18\n\t" \
+    "stp x0, x1, [sp, #-0x50]!\n\t" \
+    "stp x2, x3, [sp, #0x10]\n\t" \
+    "stp x4, x5, [sp, #0x20]\n\t" \
+    "stp x6, x7, [sp, #0x30]\n\t" \
+    "str x8, [sp, #0x40]\n\t" \
+    X18_UNIX_MODE_ENTER \
+    "ldp x2, x3, [sp, #0x10]\n\t" \
+    "ldp x4, x5, [sp, #0x20]\n\t" \
+    "ldp x6, x7, [sp, #0x30]\n\t" \
+    "ldr x8, [sp, #0x40]\n\t" \
+    "ldp x0, x1, [sp], #0x50\n\t"
+#else
+# define X18_PE_MODE_ENTER ""
+# define X18_UNIX_MODE_ENTER ""
+# define SYSCALL_TEB_REG "x18"
+# define X18_SYSCALL_ENTRY ""
+# define X18_UNIXCALL_ENTRY ""
+# define X18_UNIXCALL_EXIT ""
+#endif
+
 /* stack layout when calling KiUserExceptionDispatcher */
 struct exc_stack_layout
 {
@@ -849,32 +895,30 @@ __ASM_GLOBAL_FUNC( call_user_mode_callback,
                    "stp d12, d13, [x29, #0x80]\n\t"
                    "stp d14, d15, [x29, #0x90]\n\t"
                    "stp x1, x2, [x29, #0xa0]\n\t" /* ret_ptr, ret_len */
-                   "mov x18, x4\n\t"              /* teb */
+                   "mov x19, x4\n\t"              /* teb (x18 is not usable on the Unix side of macOS) */
+                   "mov x20, x0\n\t"              /* user_sp */
+                   "mov x21, x3\n\t"              /* func */
                    "mrs x1, fpcr\n\t"
                    "mrs x2, fpsr\n\t"
                    "bfi x1, x2, #0, #32\n\t"
-                   "ldr x2, [x18]\n\t"            /* teb->Tib.ExceptionList */
+                   "ldr x2, [x19]\n\t"            /* teb->Tib.ExceptionList */
                    "stp x1, x2, [x29, #0xb0]\n\t"
 
-                   "ldr x7, [x18, #0x378]\n\t"    /* thread_data->syscall_frame */
+                   "ldr x7, [x19, #0x378]\n\t"    /* thread_data->syscall_frame */
                    "sub x1, sp, #0x330\n\t"       /* sizeof(struct syscall_frame) */
-                   "str x1, [x18, #0x378]\n\t"    /* thread_data->syscall_frame */
+                   "str x1, [x19, #0x378]\n\t"    /* thread_data->syscall_frame */
                    "add x8, x29, #0xd0\n\t"
                    "stp x7, x8, [x1, #0x110]\n\t" /* frame->prev_frame,syscall_cfa */
-                   "ldr w11, [x18, #0x380]\n\t"   /* thread_data->syscall_trace */
-                   "cbnz x11, 1f\n\t"
-                   /* switch to user stack */
-                   "mov sp, x0\n\t"               /* user_sp */
-                   "br x3\n"
-                   "1:\tmov x19, x18\n\t"         /* teb */
-                   "mov x20, x0\n\t"              /* user_sp */
-                   "mov x21, x3\n\t"              /* func */
                    "mov sp, x1\n\t"
+                   "ldr w11, [x19, #0x380]\n\t"   /* thread_data->syscall_trace */
+                   "cbz x11, 2f\n\t"
                    "ldr x1, [x20]\n\t"            /* args */
                    "ldp w2, w0, [x20, #8]\n\t"    /* len, id */
                    "str x0, [x29, #0xc0]\n\t"     /* id */
-                   "bl " __ASM_NAME("trace_usercall") "\n\t"
+                   "bl " __ASM_NAME("trace_usercall") "\n"
+                   "2:\t" X18_PE_MODE_ENTER
                    "mov x18, x19\n\t"             /* teb */
+                   /* switch to user stack */
                    "mov sp, x20\n\t"              /* user_sp */
                    "br x21" )
 
@@ -1055,6 +1099,9 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
         TRACE( "returning to user mode ip=%p ret=%08x\n", (void *)frame->pc, rec->ExceptionCode );
         REGn_sig(0, context)  = rec->ExceptionCode;
         REGn_sig(18, context) = (ULONG_PTR)NtCurrentTeb();
+#ifdef __APPLE__
+        REGn_sig(24, context) = (ULONG_PTR)NtCurrentTeb();  /* x18 is not restored in Unix mode */
+#endif
         SP_sig(context)       = (ULONG_PTR)frame;
         PC_sig(context)       = (ULONG_PTR)__wine_syscall_dispatcher_return;
     }
@@ -1383,6 +1430,33 @@ void signal_free_thread( TEB *teb )
 }
 
 
+#ifdef __APPLE__
+/***********************************************************************
+ *           x18_signal_entry
+ *
+ * All signal handlers run in Unix mode. A signal that interrupts PE code arrives in PE mode (x18 = TEB,
+ * saved in the ucontext); leave that mode for the duration of the handler and re-enter it when the
+ * context that is resumed is PE code (the interrupted one, or the PE state that usr2_handler installs).
+ */
+typedef void (*sigaction_handler)( int, siginfo_t *, void * );
+static sigaction_handler real_handlers[32];
+
+static void x18_signal_entry( int signal, siginfo_t *siginfo, void *sigcontext )
+{
+    ucontext_t *context = sigcontext;
+    ULONG_PTR old_sp = SP_sig( context );
+    BOOL was_pe = os_custom_x18_abi_enabled();
+
+    if (was_pe) os_set_custom_x18_abi_enabled( FALSE );
+    real_handlers[signal]( signal, siginfo, sigcontext );
+    if (was_pe || (signal == SIGUSR2 && is_inside_syscall( old_sp ))) os_set_custom_x18_abi_enabled( TRUE );
+}
+# define SIGNAL_HANDLER(sig,func) (real_handlers[sig] = (func), x18_signal_entry)
+#else
+# define SIGNAL_HANDLER(sig,func) (func)
+#endif
+
+
 /**********************************************************************
  *		signal_init_process
  */
@@ -1399,25 +1473,25 @@ void signal_init_process(void)
     sig_act.sa_mask = server_block_set;
     sig_act.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
 
-    sig_act.sa_sigaction = int_handler;
+    sig_act.sa_sigaction = SIGNAL_HANDLER( SIGINT, int_handler );
     if (sigaction( SIGINT, &sig_act, NULL ) == -1) goto error;
-    sig_act.sa_sigaction = fpe_handler;
+    sig_act.sa_sigaction = SIGNAL_HANDLER( SIGFPE, fpe_handler );
     if (sigaction( SIGFPE, &sig_act, NULL ) == -1) goto error;
-    sig_act.sa_sigaction = abrt_handler;
+    sig_act.sa_sigaction = SIGNAL_HANDLER( SIGABRT, abrt_handler );
     if (sigaction( SIGABRT, &sig_act, NULL ) == -1) goto error;
-    sig_act.sa_sigaction = quit_handler;
+    sig_act.sa_sigaction = SIGNAL_HANDLER( SIGQUIT, quit_handler );
     if (sigaction( SIGQUIT, &sig_act, NULL ) == -1) goto error;
-    sig_act.sa_sigaction = usr1_handler;
+    sig_act.sa_sigaction = SIGNAL_HANDLER( SIGUSR1, usr1_handler );
     if (sigaction( SIGUSR1, &sig_act, NULL ) == -1) goto error;
-    sig_act.sa_sigaction = usr2_handler;
+    sig_act.sa_sigaction = SIGNAL_HANDLER( SIGUSR2, usr2_handler );
     if (sigaction( SIGUSR2, &sig_act, NULL ) == -1) goto error;
-    sig_act.sa_sigaction = trap_handler;
+    sig_act.sa_sigaction = SIGNAL_HANDLER( SIGTRAP, trap_handler );
     if (sigaction( SIGTRAP, &sig_act, NULL ) == -1) goto error;
-    sig_act.sa_sigaction = segv_handler;
+    sig_act.sa_sigaction = SIGNAL_HANDLER( SIGSEGV, segv_handler );
     if (sigaction( SIGSEGV, &sig_act, NULL ) == -1) goto error;
-    sig_act.sa_sigaction = ill_handler;
+    sig_act.sa_sigaction = SIGNAL_HANDLER( SIGILL, ill_handler );
     if (sigaction( SIGILL, &sig_act, NULL ) == -1) goto error;
-    sig_act.sa_sigaction = bus_handler;
+    sig_act.sa_sigaction = SIGNAL_HANDLER( SIGBUS, bus_handler );
     if (sigaction( SIGBUS, &sig_act, NULL ) == -1) goto error;
     return;
 
@@ -1594,9 +1668,10 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    __ASM_CFI(".cfi_offset 26, -0x78\n\t")
                    __ASM_CFI(".cfi_offset 27, -0x70\n\t")
                    __ASM_CFI(".cfi_offset 28, -0x68\n\t")
+                   X18_SYSCALL_ENTRY
                    "and x20, x8, #0xfff\n\t"    /* syscall number */
                    "ubfx x21, x8, #12, #2\n\t"  /* syscall table number */
-                   "ldr x16, [x18, #0x370]\n\t" /* thread_data->syscall_table */
+                   "ldr x16, [" SYSCALL_TEB_REG ", #0x370]\n\t" /* thread_data->syscall_table */
                    "add x21, x16, x21, lsl #5\n\t"
                    "ldr x16, [x21, #16]\n\t"    /* table->ServiceLimit */
                    "cmp x20, x16\n\t"
@@ -1614,21 +1689,28 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "cbnz x9, 1b\n"
                    "2:\tldr x16, [x21]\n\t"     /* table->ServiceTable */
                    "ldr x23, [x16, x20, lsl 3]\n\t"
-                   "ldr w11, [x18, #0x380]\n\t" /* thread_data->syscall_trace */
+                   "ldr w11, [" SYSCALL_TEB_REG ", #0x380]\n\t" /* thread_data->syscall_trace */
                    "cbnz x11, " __ASM_LOCAL_LABEL("trace_syscall") "\n\t"
                    "blr x23\n\t"
                    "mov sp, x22\n"
                    __ASM_CFI_CFA_IS_AT2(sp, 0x98, 0x02) /* frame->syscall_cfa */
                    __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") ":\n\t"
                    "ldr w16, [sp, #0x10c]\n\t"  /* frame->restore_flags */
-                   "tbz x16, #1, 2f\n\t"        /* CONTEXT_INTEGER */
+                   "tbz x16, #1, 3f\n\t"        /* CONTEXT_INTEGER */
                    "ldp x12, x13, [sp, #0x80]\n\t" /* frame->x[16..17] */
                    "ldp x14, x15, [sp, #0xf8]\n\t" /* frame->sp, frame->pc */
                    "cmp x12, x15\n\t"              /* frame->x16 == frame->pc? */
                    "ccmp x13, x14, #0, eq\n\t"     /* frame->x17 == frame->sp? */
-                   "beq 1f\n\t"                    /* take slowpath if unequal */
+                   "beq 3f\n\t"                    /* take slowpath if unequal */
                    "bl " __ASM_NAME("syscall_dispatcher_return_slowpath") "\n"
-                   "1:\tldp x0, x1, [sp, #0x00]\n\t"
+                   /* back to PE mode (the slow path does it from the signal handler wrapper) */
+                   "3:\tstp x0, x1, [sp, #-0x20]!\n\t"
+                   "str x16, [sp, #0x10]\n\t"
+                   X18_PE_MODE_ENTER
+                   "ldr x16, [sp, #0x10]\n\t"
+                   "ldp x0, x1, [sp], #0x20\n\t"
+                   "tbz x16, #1, 2f\n\t"        /* CONTEXT_INTEGER */
+                   "ldp x0, x1, [sp, #0x00]\n\t"
                    "ldp x2, x3, [sp, #0x10]\n\t"
                    "ldp x4, x5, [sp, #0x20]\n\t"
                    "ldp x6, x7, [sp, #0x30]\n\t"
@@ -1701,7 +1783,7 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "b " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") )
 
 __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher_return,
-                   "ldr w11, [x18, #0x380]\n\t" /* thread_data->syscall_trace */
+                   "ldr w11, [" SYSCALL_TEB_REG ", #0x380]\n\t" /* thread_data->syscall_trace */
                    "cbnz x11, " __ASM_LOCAL_LABEL("trace_syscall_ret") "\n\t"
                    "b " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") )
 
@@ -1743,12 +1825,14 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
                    __ASM_CFI(".cfi_offset 26, -0x78\n\t")
                    __ASM_CFI(".cfi_offset 27, -0x70\n\t")
                    __ASM_CFI(".cfi_offset 28, -0x68\n\t")
+                   X18_UNIXCALL_ENTRY
                    "ldr x16, [x0, x1, lsl 3]\n\t"
                    "mov x0, x2\n\t"             /* args */
                    "blr x16\n\t"
                    "ldr w16, [sp, #0x10c]\n\t"  /* frame->restore_flags */
                    "cbnz w16, " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") "\n\t"
                    __ASM_CFI_CFA_IS_AT2(sp, 0x98, 0x02) /* frame->syscall_cfa */
+                   X18_UNIXCALL_EXIT
                    "ldp x18, x19, [sp, #0x90]\n\t"
                    "ldp x16, x17, [sp, #0xf8]\n\t"
                    /* switch to user stack */
