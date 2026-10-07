@@ -1168,6 +1168,21 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 {
     EXCEPTION_RECORD rec = { EXCEPTION_DATATYPE_MISALIGNMENT };
 
+#ifdef __APPLE__
+    /* macOS arm64 delivers page-permission faults (write to a read-only page, execute of a non-exec page,
+     * access to PROT_NONE) as SIGBUS with si_code BUS_ADRALN, only the ESR tells them from real alignment faults */
+    {
+        DWORD64 esr = get_fault_esr( sigcontext );
+        DWORD ec = esr >> 26;
+
+        if ((ec == 0x20 || ec == 0x21 || ec == 0x24 || ec == 0x25) && (esr & 0x3f) != 0x21)
+        {
+            segv_handler( signal, siginfo, sigcontext );
+            return;
+        }
+    }
+#endif
+
     setup_exception( sigcontext, &rec );
 }
 
