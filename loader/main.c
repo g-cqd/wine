@@ -83,6 +83,30 @@ static void init_reserved_areas(void)
     }
 }
 
+#elif defined(__APPLE__) && defined(__aarch64__)
+
+/* Entitled arm64 (com.apple.developer.cross-architecture-support): the kernel leaves the unused part of
+ * the default 4 GiB __PAGEZERO as one soft, inaccessible VM entry [0x1000, image base), so nothing (dyld,
+ * system frameworks, malloc) can be placed in the low 4 GiB before we take it over. We only have to tell
+ * ntdll that this range is reserved for the Windows address space, and re-create it under our own name.
+ */
+static const struct wine_preload_info preload_info[] =
+{
+    { (void *)0x1000, 0xfffff000 },  /* 0x1000 - 0x100000000: low 4GB */
+    { 0, 0 }                         /* end of list */
+};
+
+const __attribute((visibility("default"))) struct wine_preload_info *wine_main_preload_info = preload_info;
+
+static void init_reserved_areas(void)
+{
+    int i;
+
+    for (i = 0; wine_main_preload_info[i].size != 0; i++)
+        mmap(wine_main_preload_info[i].addr, wine_main_preload_info[i].size, PROT_NONE,
+             MAP_FIXED | MAP_NORESERVE | MAP_PRIVATE | MAP_ANON, -1, 0);
+}
+
 #else
 
 /* the preloader will set this variable */
@@ -176,7 +200,7 @@ static void *try_dlopen( const char *argv0 )
     return handle;
 }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(__aarch64__)  /* arm64: never write to the signed __TEXT pages */
 #define min(a,b)   (((a) < (b)) ? (a) : (b))
 /***********************************************************************
  *           apple_override_bundle_name
@@ -277,7 +301,7 @@ int main( int argc, char *argv[] )
 
     init_reserved_areas();
 
-#ifdef __APPLE__ /* CrossOver Hack 13438 */
+#if defined(__APPLE__) && !defined(__aarch64__) /* CrossOver Hack 13438 */
     apple_override_bundle_name(argc, argv);
 #endif
 
