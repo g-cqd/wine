@@ -2766,6 +2766,18 @@ static void *get_host_addr_space_limit(void)
     unsigned int flags = MAP_PRIVATE | MAP_ANON;
     UINT_PTR addr = (UINT_PTR)1 << 63;
 
+#if defined(__APPLE__) && defined(__aarch64__)
+    /* mmap() hints are not honoured on macOS, so probing finds no limit: ask the kernel (the top of the user
+     * address space is below 2^47, 0x7ffffe000000 on arm64) */
+    {
+        task_vm_info_data_t info;
+        mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+
+        if (!task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count ) && info.max_address)
+            return (void *)((info.max_address - 1) & ~(UINT_PTR)granularity_mask);
+    }
+#endif
+
 #ifdef MAP_FIXED_NOREPLACE
     flags |= MAP_FIXED_NOREPLACE;
 #endif
@@ -3664,6 +3676,9 @@ void virtual_init(void)
 #ifdef _WIN64
     host_addr_space_limit = get_host_addr_space_limit();
     TRACE( "host addr space limit: %p\n", host_addr_space_limit );
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (host_addr_space_limit < address_space_limit) address_space_limit = host_addr_space_limit;
+#endif
 #else
     host_addr_space_limit = address_space_limit;
 #endif
