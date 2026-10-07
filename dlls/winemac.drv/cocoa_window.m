@@ -989,7 +989,11 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 
     - (CALayer*) makeBackingLayer
     {
+#if defined(__x86_64__)
         CAMetalLayer *layer = [WineMetalLayer layer];   /* CW HACK 22435 */
+#else   /* D3DMetal (and WineMetalLayer) exist only for x86_64 */
+        CAMetalLayer *layer = [CAMetalLayer layer];
+#endif
         layer.device = _device;
         layer.framebufferOnly = YES;
         layer.magnificationFilter = kCAFilterNearest;
