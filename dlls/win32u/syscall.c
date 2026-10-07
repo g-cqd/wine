@@ -61,12 +61,22 @@ static void stub_syscall( const char *name )
 #define SYSCALL_STUB(name) static void name(void) { stub_syscall( #name ); }
 ALL_SYSCALL_STUBS
 
+#if defined(__APPLE__) && defined(__aarch64__)
+/* see dlls/ntdll/unix/loader.c: Apple's ABI packs small stack arguments, the PE caller uses 8-byte slots */
+# include "apple_stack_thunks.h"
+# include "apple_stack_thunks_rename.h"
+#endif
+
 static ULONG_PTR syscalls[] =
 {
 #define SYSCALL_ENTRY(id,name,args) (ULONG_PTR)name,
     ALL_SYSCALLS
 #undef SYSCALL_ENTRY
 };
+
+#if defined(__APPLE__) && defined(__aarch64__)
+# include "apple_stack_thunks_unrename.h"
+#endif
 
 static BYTE arguments[ARRAY_SIZE(syscalls)] =
 {
