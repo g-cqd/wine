@@ -320,8 +320,9 @@ static char *build_relative_path( const char *base, const char *from, const char
 #if defined(__APPLE__) && defined(__aarch64__)
 /* Native arm64: the 4 KiB page size (and the low 4 GiB) exist only in processes created with
  * posix_spawnattr_set_4k_page_size_np() from an entitled binary, and the attribute is NOT inherited
- * by fork/exec, posix_spawn without it, or POSIX_SPAWN_SETEXEC. Every spawn or exec of a Wine binary
- * must therefore go through here. Never use it for system binaries (they fail with EBADMACHO). */
+ * by fork/exec, posix_spawn without it, or POSIX_SPAWN_SETEXEC. Every spawn or exec of the entitled Wine
+ * loader must therefore go through here. Never use it for other binaries (wineserver, system tools): they are
+ * not entitled and the spawn fails with EBADMACHO. */
 static int spawn_wine_binary( pid_t *pid, const char *path, char **argv, BOOL setexec )
 {
     posix_spawnattr_t attr;
@@ -342,11 +343,8 @@ static int build_path_and_exec( pid_t *pid, const char *dir, const char *name, c
     int ret;
 
     argv[0] = build_path( dir, name );
-#if defined(__APPLE__) && defined(__aarch64__)
-    ret = spawn_wine_binary( pid, argv[0], argv, FALSE );
-#else
+    /* the wineserver runs no Windows code: it stays an unentitled, 16K-page process on arm64 macOS */
     ret = posix_spawn( pid, argv[0], NULL, NULL, argv, environ );
-#endif
     free( argv[0] );
     return ret;
 }
