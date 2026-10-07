@@ -1363,6 +1363,11 @@ static int get_unix_prot( BYTE vprot )
         if (vprot & VPROT_EXEC) prot |= PROT_EXEC | PROT_READ;
         if (vprot & VPROT_WRITEWATCH) prot &= ~PROT_WRITE;
     }
+#if defined(__APPLE__) && defined(__aarch64__)
+    /* macOS arm64 refuses writable+executable memory outside MAP_JIT: map W|X pages writable and let
+     * virtual_handle_fault switch them to executable on demand (see there for the policy) */
+    if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) prot &= ~PROT_EXEC;
+#endif
     if (!prot) prot = PROT_NONE;
     return prot;
 }
@@ -4568,7 +4573,29 @@ NTSTATUS virtual_handle_fault( EXCEPTION_RECORD *rec, void *stack )
     mutex_lock( &virtual_mutex );  /* no need for signal masking inside signal handler */
     vprot = get_host_page_vprot( page );
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && defined(__aarch64__)
+    /* Executable+writable (PAGE_EXECUTE_READWRITE / WRITECOPY) memory policy on macOS arm64, where RWX is
+     * refused outside MAP_JIT. get_unix_prot() maps such pages RW; here we toggle (W^X) per host page:
+     *  - native code: an execute fault on a page whose vprot has EXEC|WRITE makes it R|X (icache flushed),
+     *    the next write fault makes it RW again. Both mprotect calls are idempotent, so no state is needed.
+     *  - x86 guest memory (WoW64 process, below 4 GiB): the host never executes it (the translator reads it
+     *    as data and runs its own translated code), so it simply stays RW with the requested protection
+     *    recorded in vprot; faults there are reported as access violations like for any other bad access. */
+    if ((vprot & VPROT_COMMITTED) && !(vprot & VPROT_GUARD) && (vprot & VPROT_EXEC) &&
+        (vprot & (VPROT_WRITE | VPROT_WRITECOPY)) &&
+        !(is_wow64() && (ULONG_PTR)page < 0x100000000) &&
+        (err == EXCEPTION_EXECUTE_FAULT || err == EXCEPTION_WRITE_FAULT))
+    {
+        int unix_prot = err == EXCEPTION_EXECUTE_FAULT ? PROT_READ | PROT_EXEC : PROT_READ | PROT_WRITE;
+
+        if (!mprotect( page, host_page_size, unix_prot ))
+        {
+            if (err == EXCEPTION_EXECUTE_FAULT) __builtin___clear_cache( page, page + host_page_size );
+            ret = STATUS_SUCCESS;
+            goto done;
+        }
+    }
+#elif defined(__APPLE__)
     /* Rosetta on Apple Silicon misreports certain write faults as read faults. */
     if (err == EXCEPTION_READ_FAULT && (get_unix_prot( vprot ) & PROT_READ))
     {
