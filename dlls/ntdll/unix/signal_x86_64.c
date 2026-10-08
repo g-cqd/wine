@@ -2836,7 +2836,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         if (TRAP_sig(ucontext) == TRAP_x86_PAGEFLT)
         {
             BOOL step;
-            if (virtual_wx_fault( siginfo->si_addr, is_inside_syscall( RSP_sig(ucontext) ),
+            if (virtual_wx_fault( siginfo->si_addr, (void *)RIP_sig(ucontext), is_inside_syscall( RSP_sig(ucontext) ),
                                   tf_thread_data() && (amd64_thread_data()->tf_state & TF_CARRIER), &step ))
             {
                 if (step)

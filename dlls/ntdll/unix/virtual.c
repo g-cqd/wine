@@ -1950,7 +1950,12 @@ static int is_apple_silicon(void);
  * and retranslates before the next instruction. Pages written by Wine itself (a fault inside host
  * code), pages that fault too often (data mixed with code) and every fault while the trap-flag
  * emulation is active are released: the page stays writable until its protection changes or it is
- * freed, which is the behaviour without the switch. Image sections and file views are never touched. */
+ * freed, which is the behaviour without the switch. Image sections and file views are never touched.
+ *
+ * Since patch 0010: a page that has seen a store from code on or next to it (self-modifying code) is never given up as
+ * busy (WINE_RWX_WX_NEAR_LIMIT), faults under the trap-flag emulation are emulated like any other (the step trap closes
+ * the page, WINE_RWX_WX_TF_RELEASE=1 restores the old release), a released page is evaluated again after any protection
+ * change or decommit, and WINE_RWX_WX_LOG=<hexstart>-<hexend>|all logs what happens to the pages in the window. */
 #define WX_RELEASED_MAX   16
 #define WX_HOT_MAX        8
 /* A store costs about 70 us while a page is protected, so one second allows at most ~14000 of them. Filling a
@@ -1958,40 +1963,125 @@ static int is_apple_silicon(void);
  * early defeats the emulation): only a page that is written thousands of times within a second counts as busy. */
 #define WX_HOT_LIMIT      4096        /* default: this many faults on one page ... */
 #define WX_HOT_WINDOW_NS  1000000000ULL /* ... within this time release the page (WINE_RWX_WX_HOT_LIMIT, 0 = never) */
+/* A store whose instruction pointer is on the stored-to page or next to it is the very pattern the emulation exists for
+ * (code patching its own instruction stream): the NFS16 stub runs thousands of times and its two stores per run must
+ * never be given up on (wine-0009 released the stub page as busy after ~2000 runs and the next run crashed). A page
+ * that has seen such a store is therefore never released for being busy (WINE_RWX_WX_NEAR_LIMIT=<stores per second>
+ * sets a limit, default 0 = never: slow is better than a crash); stores from code elsewhere (heap, JIT buffers,
+ * data) use the busy-page limit above. */
+#define WX_NEAR_LIMIT     0
 
 static struct { char *page; BYTE vprot; } wx_released[WX_RELEASED_MAX];
-static struct { char *page; unsigned int count; unsigned long long start; } wx_hot[WX_HOT_MAX];
+static struct { char *page; unsigned int count, near_count; unsigned long long start; BOOL smc; } wx_hot[WX_HOT_MAX];
 static struct { unsigned int guest, host, carrier, hot, steps; } wx_stats;
 static int wx_mode = -1, wx_announced;
-static unsigned int wx_hot_limit = WX_HOT_LIMIT, wx_released_next;
+static ULONG_PTR wx_log_lo, wx_log_hi;   /* WINE_RWX_WX_LOG window, see wx_logged() */
+static unsigned int wx_log_lines, wx_slot_next;
+static const char *wx_why = "other";      /* the path that is about to recompute host protections (for the log) */
+static unsigned int wx_hot_limit = WX_HOT_LIMIT, wx_near_limit = WX_NEAR_LIMIT, wx_released_next;
+static int wx_release_in_carrier;  /* WINE_RWX_WX_TF_RELEASE=1: the 0008/0009 behaviour, give a page up for good when it faults under the trap-flag emulation */
 
 static BOOL wx_emulation(void)
 {
     if (wx_mode < 0)
     {
-        const char *e = getenv( "WINE_RWX_WX_EMULATION" ), *l = getenv( "WINE_RWX_WX_HOT_LIMIT" );
+        const char *e = getenv( "WINE_RWX_WX_EMULATION" ), *l = getenv( "WINE_RWX_WX_HOT_LIMIT" ), *nl = getenv( "WINE_RWX_WX_NEAR_LIMIT" ), *tr = getenv( "WINE_RWX_WX_TF_RELEASE" );
+        const char *g = getenv( "WINE_RWX_WX_LOG" );
         wx_mode = (e && e[0] == '1' && !e[1] && is_apple_silicon()) ? 1 : 0;
-        if (l) wx_hot_limit = strtoul( l, NULL, 10 );
+        if (l) { wx_hot_limit = strtoul( l, NULL, 10 ); if (!wx_hot_limit) wx_near_limit = 0; }
+        if (nl) wx_near_limit = strtoul( nl, NULL, 10 );
+        wx_release_in_carrier = tr && tr[0] == '1';
+        if (g && wx_mode)
+        {
+            char *end;
+            if (!strcmp( g, "all" )) { wx_log_lo = 0; wx_log_hi = ~(ULONG_PTR)0; }
+            else
+            {
+                wx_log_lo = strtoull( g, &end, 16 );
+                if (*end == '-') wx_log_hi = strtoull( end + 1, NULL, 16 );
+                if (wx_log_hi <= wx_log_lo) wx_log_hi = 0;
+            }
+        }
     }
     return wx_mode;
 }
 
-static BOOL wx_eligible( char *page, BYTE vprot )
+/* WINE_RWX_WX_LOG=<hexstart>-<hexend> | all: one stderr line per state change of a page in the window (at most
+ * WX_LOG_MAX lines per process): when the emulation takes over a page (and through which path), why an RWX page
+ * is left alone, why a page is released, and the first stores with their instruction pointer. */
+#define WX_LOG_MAX 200
+#define WX_PAGES_MAX 32
+static struct { char *page; unsigned int stores; int state; } wx_pages[WX_PAGES_MAX];  /* state: 1 protected, 2 released, 3 skipped */
+
+static BOOL wx_logged( char *page )
+{
+    return wx_log_hi && wx_log_lines < WX_LOG_MAX && (ULONG_PTR)page >= wx_log_lo && (ULONG_PTR)page < wx_log_hi;
+}
+
+static void wx_logf( const char *fmt, ... ) __attribute__((format(printf, 1, 2)));
+static void wx_logf( const char *fmt, ... )
+{
+    char buf[200];
+    va_list ap;
+    int len;
+
+    wx_log_lines++;
+    va_start( ap, fmt );
+    len = vsnprintf( buf, sizeof(buf), fmt, ap );
+    va_end( ap );
+    if (len > 0) write( 2, buf, len < (int)sizeof(buf) ? len : (int)sizeof(buf) - 1 );
+}
+
+static int wx_slot( char *page, BOOL create )
+{
+    unsigned int i;
+    int free_slot = -1;
+
+    for (i = 0; i < WX_PAGES_MAX; i++)
+    {
+        if (wx_pages[i].page == page) return i;
+        if (!wx_pages[i].page && free_slot < 0) free_slot = i;
+    }
+    if (!create) return -1;
+    if (free_slot < 0) free_slot = wx_slot_next++ % WX_PAGES_MAX;  /* recycle */
+    wx_pages[free_slot].page = page;
+    wx_pages[free_slot].stores = 0;
+    wx_pages[free_slot].state = 0;
+    return free_slot;
+}
+
+/* NULL when the page is emulated, otherwise why not (NULL-terminated names, "n/a" = not an RWX page) */
+static const char *wx_check( char *page, BYTE vprot )
 {
     const BYTE need = VPROT_COMMITTED | VPROT_READ | VPROT_WRITE | VPROT_EXEC;
     struct file_view *view;
     unsigned int i;
 
-    if (!wx_emulation()) return FALSE;
-    if ((vprot & need) != need || (vprot & (VPROT_GUARD | VPROT_WRITEWATCH | VPROT_WRITECOPY))) return FALSE;
-    if (!(view = find_view( page, 0 )) || !is_view_valloc( view ) ||
-        (view->protect & (VPROT_SYSTEM | VPROT_PLACEHOLDER))) return FALSE;
+    if (!wx_emulation()) return "off";
+    for (i = 0; i < WX_RELEASED_MAX; i++)
+    {
+        if (wx_released[i].page != page || wx_released[i].vprot == vprot) continue;
+        wx_released[i].page = NULL;  /* the protection changed since (also to a non-RWX one): evaluate again from scratch */
+        if (wx_logged( page )) wx_logf( "wine-rwx: page %p released state dropped after a protection change\n", page );
+    }
+    for (i = 0; i < WX_HOT_MAX; i++)
+        if (wx_hot[i].page == page && (vprot & need) != need) wx_hot[i].page = NULL;
+    if ((vprot & need) != need) return "n/a";
+    if (vprot & (VPROT_GUARD | VPROT_WRITEWATCH | VPROT_WRITECOPY)) return "flags";
+    if (!(view = find_view( page, 0 ))) return "noview";
+    if (!is_view_valloc( view )) return "notvalloc";
+    if (view->protect & (VPROT_SYSTEM | VPROT_PLACEHOLDER)) return "system";
     for (i = 0; i < WX_RELEASED_MAX; i++)
     {
         if (wx_released[i].page != page) continue;
-        if (wx_released[i].vprot == vprot) return FALSE;
-        wx_released[i].page = NULL;  /* the protection changed since: evaluate again */
+        if (wx_released[i].vprot == vprot) return "released";
     }
+    return NULL;
+}
+
+static BOOL wx_eligible( char *page, BYTE vprot )
+{
+    if (wx_check( page, vprot )) return FALSE;
     if (!wx_announced)
     {
         char buf[96];
@@ -2002,15 +2092,39 @@ static BOOL wx_eligible( char *page, BYTE vprot )
     return TRUE;
 }
 
+/* called whenever a page's host protection is (re)computed: log the transitions of pages in the log window */
+static void wx_note( char *page, BYTE vprot )
+{
+    const char *no;
+    int slot, state;
+
+    if (!wx_logged( page )) return;
+    no = wx_check( page, vprot );
+    if (no && !strcmp( no, "n/a" )) { if ((slot = wx_slot( page, FALSE )) >= 0) wx_pages[slot].state = 0; return; }
+    state = no ? (!strcmp( no, "released" ) ? 2 : 3) : 1;
+    slot = wx_slot( page, TRUE );
+    if (wx_pages[slot].state == state) return;
+    wx_pages[slot].state = state;
+    if (!no) wx_logf( "wine-rwx: page %p protect(reason=%s) vprot=%#x\n", page, wx_why, vprot );
+    else wx_logf( "wine-rwx: page %p skipped(reason=%s) vprot=%#x via=%s\n", page, no, vprot, wx_why );
+}
+
 static int wx_unix_prot( char *page, BYTE vprot )
 {
     int prot = get_unix_prot( vprot );
+    if (wx_mode) wx_note( page, vprot );
     if (wx_eligible( page, vprot )) prot &= ~PROT_WRITE;
     return prot;
 }
 
-static void wx_release( char *page, BYTE vprot )
+static void wx_release( char *page, BYTE vprot, const char *reason )
 {
+    if (wx_logged( page ))
+    {
+        int slot = wx_slot( page, TRUE );
+        wx_pages[slot].state = 2;
+        wx_logf( "wine-rwx: page %p release(reason=%s) stores=%u\n", page, reason, wx_pages[slot].stores );
+    }
     wx_released[wx_released_next % WX_RELEASED_MAX].page = page;
     wx_released[wx_released_next % WX_RELEASED_MAX].vprot = vprot;
     wx_released_next++;
@@ -2024,7 +2138,7 @@ static void wx_open_for_kernel( char *page, BYTE vprot )
     if (wx_mode > 0 && wx_eligible( page, vprot ))
     {
         wx_stats.host++;
-        wx_release( page, vprot );
+        wx_release( page, vprot, "host-kernel" );
     }
 }
 
@@ -2040,7 +2154,7 @@ static void wx_forget( void *base, size_t size )
             wx_hot[i].page = NULL;
 }
 
-static BOOL wx_page_is_hot( char *page )
+static BOOL wx_page_is_hot( char *page, BOOL near_store, const char **reason )
 {
     struct timespec ts;
     unsigned long long now;
@@ -2054,19 +2168,29 @@ static BOOL wx_page_is_hot( char *page )
         if (!wx_hot[i].page || wx_hot[i].start < wx_hot[slot].start) slot = i;
     }
     wx_hot[slot].page = page;
-    wx_hot[slot].count = 0;
+    wx_hot[slot].count = wx_hot[slot].near_count = 0;
+    wx_hot[slot].smc = FALSE;
     wx_hot[slot].start = now;
 found:
-    if (now - wx_hot[slot].start > WX_HOT_WINDOW_NS) { wx_hot[slot].count = 0; wx_hot[slot].start = now; }
-    return wx_hot_limit && ++wx_hot[slot].count > wx_hot_limit;
+    if (now - wx_hot[slot].start > WX_HOT_WINDOW_NS) { wx_hot[slot].count = wx_hot[slot].near_count = 0; wx_hot[slot].start = now; }
+    if (near_store) wx_hot[slot].smc = TRUE;   /* code that stores into its own page: sticky for as long as the page is tracked */
+    if (near_store) wx_hot[slot].near_count++; else wx_hot[slot].count++;
+    if (wx_hot[slot].smc)
+    {
+        *reason = "hot-smc";
+        return wx_near_limit && wx_hot[slot].count + wx_hot[slot].near_count > wx_near_limit;
+    }
+    *reason = "hot";
+    return wx_hot_limit && wx_hot[slot].count > wx_hot_limit;
 }
 
 /* called from the SIGSEGV handler for every page fault before anything else sees it;
  * returns TRUE if the fault was a store to an emulated W^X page and has been dealt with */
-BOOL virtual_wx_fault( void *addr, BOOL in_syscall, BOOL carrier, BOOL *step )
+BOOL virtual_wx_fault( void *addr, void *rip, BOOL in_syscall, BOOL carrier, BOOL *step )
 {
     char *page = ROUND_ADDR( addr, host_page_mask );
     BOOL handled = FALSE;
+    const char *why;
     BYTE vprot;
 
     *step = FALSE;
@@ -2075,12 +2199,21 @@ BOOL virtual_wx_fault( void *addr, BOOL in_syscall, BOOL carrier, BOOL *step )
     vprot = get_host_page_vprot( page );
     if (wx_eligible( page, vprot ))
     {
-        if (in_syscall) { wx_stats.host++; wx_release( page, vprot ); }
-        else if (carrier) { wx_stats.carrier++; wx_release( page, vprot ); }
-        else if (wx_page_is_hot( page )) { wx_stats.hot++; wx_release( page, vprot ); }
+        if (in_syscall) { wx_stats.host++; wx_release( page, vprot, "host" ); }
+        else if (carrier && wx_release_in_carrier) { wx_stats.carrier++; wx_release( page, vprot, "tf" ); }
+        else if (wx_page_is_hot( page, (char *)rip >= page - host_page_size && (char *)rip < page + 2 * host_page_size, &why ))
+        {
+            wx_stats.hot++;
+            wx_release( page, vprot, why );
+        }
         else
         {
             wx_stats.guest++;
+            if (wx_logged( page ))
+            {
+                int slot = wx_slot( page, TRUE );
+                if (++wx_pages[slot].stores <= 5) wx_logf( "wine-rwx: page %p store #%u rip=%p tid=%#x\n", page, wx_pages[slot].stores, rip, HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) );
+            }
             ntdll_get_thread_data()->wx_page = page;
             mprotect( page, host_page_size, PROT_READ | PROT_WRITE | PROT_EXEC );
             *step = TRUE;
@@ -2109,7 +2242,7 @@ void virtual_wx_cross( void *addr )
     td->wx_page = NULL;
     mutex_lock( &virtual_mutex );
     wx_stats.hot++;
-    wx_release( page, get_host_page_vprot( page ) );
+    wx_release( page, get_host_page_vprot( page ), "cross" );
     mutex_unlock( &virtual_mutex );
 }
 
@@ -2140,6 +2273,7 @@ static void __attribute__((destructor)) wx_report(void)
 }
 #else
 static inline BOOL wx_emulation(void) { return FALSE; }
+static const char *wx_why __attribute__((unused));
 static inline int wx_unix_prot( char *page, BYTE vprot ) { return get_unix_prot( vprot ); }
 static void wx_forget( void *base, size_t size ) { }
 static void wx_open_for_kernel( char *page, BYTE vprot ) { }
@@ -2699,6 +2833,7 @@ static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size 
 
     if (host_start < host_end) anon_mmap_fixed( host_start, host_end - host_start, PROT_NONE, 0 );
     set_page_vprot_bits( base, size, 0, VPROT_COMMITTED );
+    wx_forget( base, size );  /* WINE_RWX_WX_EMULATION: a recommit starts from scratch */
     if (host_start < host_end) kernel_writewatch_register_range( view, host_start, host_end - host_start );
     return STATUS_SUCCESS;
 }
@@ -5456,6 +5591,7 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
             if (status == STATUS_SUCCESS)
             {
                 base = view->base;
+                wx_why = "alloc";
                 if (vprot & VPROT_EXEC || force_exec_prot) mprotect_range( base, size, 0, 0 );
             }
         }
@@ -5470,7 +5606,7 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
         else if (view->protect & SEC_FILE) status = STATUS_ALREADY_COMMITTED;
         else if (view->protect & VPROT_FREE_PLACEHOLDER) status = STATUS_CONFLICTING_ADDRESSES;
-        else if (!(status = set_protection( view, base, size, protect )) && (view->protect & SEC_RESERVE))
+        else if ((wx_why = "commit"), !(status = set_protection( view, base, size, protect )) && (view->protect & SEC_RESERVE))
         {
             SERVER_START_REQ( add_mapping_committed_range )
             {
@@ -5853,6 +5989,7 @@ static NTSTATUS real_NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SI
         if (get_committed_size( view, base, size, &vprot, VPROT_COMMITTED ) >= size && (vprot & VPROT_COMMITTED))
         {
             old = get_win32_prot( vprot, view->protect );
+            wx_why = "protect";
             status = set_protection( view, base, size, new_prot );
 
             if (simulate_writecopy && status == STATUS_SUCCESS
