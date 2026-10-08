@@ -1953,8 +1953,11 @@ static int is_apple_silicon(void);
  * freed, which is the behaviour without the switch. Image sections and file views are never touched. */
 #define WX_RELEASED_MAX   16
 #define WX_HOT_MAX        8
-#define WX_HOT_LIMIT      300         /* default: this many faults on one page ... */
-#define WX_HOT_WINDOW_NS  100000000ULL /* ... within this time release the page (WINE_RWX_WX_HOT_LIMIT, 0 = never) */
+/* A store costs about 70 us while a page is protected, so one second allows at most ~14000 of them. Filling a
+ * whole page with 8-byte stores takes 512 (one NFS16 stub page is filled that way, and a page that is released
+ * early defeats the emulation): only a page that is written thousands of times within a second counts as busy. */
+#define WX_HOT_LIMIT      4096        /* default: this many faults on one page ... */
+#define WX_HOT_WINDOW_NS  1000000000ULL /* ... within this time release the page (WINE_RWX_WX_HOT_LIMIT, 0 = never) */
 
 static struct { char *page; BYTE vprot; } wx_released[WX_RELEASED_MAX];
 static struct { char *page; unsigned int count; unsigned long long start; } wx_hot[WX_HOT_MAX];
@@ -2086,6 +2089,28 @@ BOOL virtual_wx_fault( void *addr, BOOL in_syscall, BOOL carrier, BOOL *step )
     }
     mutex_unlock( &virtual_mutex );
     return handled;
+}
+
+/* a second page fault while a page is open for one store: the instruction touches two protected pages (a
+ * store that straddles a page boundary, a string instruction, a vector store) and could never complete with one
+ * page open at a time, it would fault between the two pages forever. Release the open page for good (counted
+ * with the busy pages), the new fault is then handled on its own. A fault on the same page just closes it. */
+void virtual_wx_cross( void *addr )
+{
+    struct ntdll_thread_data *td = ntdll_get_thread_data();
+    char *page = td->wx_page;
+
+    if (!page) return;
+    if (page == ROUND_ADDR( addr, host_page_mask ))
+    {
+        virtual_wx_step();
+        return;
+    }
+    td->wx_page = NULL;
+    mutex_lock( &virtual_mutex );
+    wx_stats.hot++;
+    wx_release( page, get_host_page_vprot( page ) );
+    mutex_unlock( &virtual_mutex );
 }
 
 /* the single-step trap after the store: close the page again */

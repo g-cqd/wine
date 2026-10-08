@@ -1025,9 +1025,32 @@ static inline void leave_handler( ucontext_t *sigcontext )
  *
  * Set the register values from a sigcontext.
  */
+#ifdef __APPLE__
+/* WINE_RWX_WX_EMULATION sets the trap flag for the one store a page is open for. A context captured in that
+ * window (suspend, GetThreadContext, an exception raised by another signal) must not carry the flag: the guest
+ * would be handed a single-step it never asked for, and the trap-flag emulation would take it for the guest's own
+ * after SetThreadContext. Close the page and take our flag out. If the store has not run yet (the thread is
+ * still at the instruction that faulted) it runs again, faults again and opens a new window after the resume.
+ * If it has run, its step trap may already be pending: remember to swallow it. */
+static void wx_abandon_window( ucontext_t *ucontext )
+{
+    struct ntdll_thread_data *td = ntdll_get_thread_data();
+
+    if (!td->wx_page) return;
+    td->wx_swallow = ((void *)RIP_sig(ucontext) != td->wx_rip);
+    virtual_wx_step();
+    if (td->wx_tf) EFL_sig(ucontext) &= ~0x100;
+    td->wx_tf = FALSE;
+}
+#else
+#define wx_abandon_window(c) ((void)0)
+#endif
+
 static void save_context( struct xcontext *xcontext, const ucontext_t *sigcontext )
 {
     CONTEXT *context = &xcontext->c;
+
+    wx_abandon_window( (ucontext_t *)sigcontext );
 
     context->ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_DEBUG_REGISTERS;
     context->Rax    = RAX_sig(sigcontext);
@@ -2803,8 +2826,10 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         struct ntdll_thread_data *wx_data = ntdll_get_thread_data();
         if (wx_data->wx_page)
         {
-            /* another fault while a page is open for one store: close it, keep our trap flag out of the guest */
-            virtual_wx_step();
+            /* another fault while a page is open for one store: close it (or release it for good when the
+             * instruction straddles two protected pages), keep our trap flag out of the guest */
+            if (TRAP_sig(ucontext) == TRAP_x86_PAGEFLT) virtual_wx_cross( siginfo->si_addr );
+            else virtual_wx_step();
             if (wx_data->wx_tf) EFL_sig(ucontext) &= ~0x100;
             wx_data->wx_tf = FALSE;
         }
@@ -2817,6 +2842,8 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                 if (step)
                 {
                     wx_data->wx_tf = !(EFL_sig(ucontext) & 0x100);
+                    wx_data->wx_rip = (void *)RIP_sig(ucontext);
+                    wx_data->wx_swallow = FALSE;
                     EFL_sig(ucontext) |= 0x100;
                 }
                 leave_handler( ucontext );
@@ -2925,6 +2952,23 @@ static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     struct xcontext context;
 
 #ifdef __APPLE__
+    if (TRAP_sig(ucontext) == TRAP_x86_TRCTRAP && !ntdll_get_thread_data()->wx_page && ntdll_get_thread_data()->wx_swallow)
+    {
+        /* the step trap of a store whose window a context capture closed while the trap was in flight */
+        ntdll_get_thread_data()->wx_swallow = FALSE;
+        EFL_sig(ucontext) &= ~0x100;
+        leave_handler( ucontext );
+        return;
+    }
+    if (TRAP_sig(ucontext) == TRAP_x86_TRCTRAP && ntdll_get_thread_data()->wx_page &&
+        is_inside_signal_stack( (void *)RSP_sig(ucontext) ))
+    {
+        /* Rosetta takes the step trap on the flags sigreturn has just restored while the thread is still inside
+         * the signal return trampoline, before the store has run. The trap flag and the open page belong to the
+         * guest context that sigreturn is restoring: leave both alone, the real step trap follows the store. */
+        leave_handler( ucontext );
+        return;
+    }
     if (TRAP_sig(ucontext) == TRAP_x86_TRCTRAP && ntdll_get_thread_data()->wx_page)
     {
         struct ntdll_thread_data *wx_data = ntdll_get_thread_data();
