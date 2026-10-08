@@ -526,6 +526,108 @@ static void format_exception_msg( const EXCEPTION_POINTERS *ptr, char *buffer, i
 }
 
 
+/* Describe one address for the crash block: page state, protection and owning module. */
+static void dump_crash_address( const char *label, const void *addr )
+{
+    MEMORY_BASIC_INFORMATION info;
+    WCHAR name[MAX_PATH];
+    HMODULE module;
+    const WCHAR *base = L"none";
+    SIZE_T len;
+
+    if (NtQueryVirtualMemory( GetCurrentProcess(), addr, MemoryBasicInformation, &info, sizeof(info), &len ))
+    {
+        MESSAGE( "wine-crash: %s %p not queryable (non-canonical or outside the address space)\n", label, addr );
+        return;
+    }
+    if (info.State != MEM_COMMIT || !GetModuleHandleExW( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                                         addr, &module ) ||
+        !GetModuleFileNameW( module, name, ARRAY_SIZE(name) ))
+        module = NULL;
+    else if ((base = wcsrchr( name, '\\' ))) base++;
+    else base = name;
+    MESSAGE( "wine-crash: %s %p state=%lx protect=%lx type=%lx region=%p+%p module=%ls\n", label, addr,
+             info.State, info.Protect, info.Type, info.BaseAddress, (void *)info.RegionSize, base );
+}
+
+
+/* Print a compact register / memory snapshot of the faulting thread, one "wine-crash:" line each. */
+static void dump_crash_context( const EXCEPTION_POINTERS *ptr )
+{
+    const EXCEPTION_RECORD *rec = ptr->ExceptionRecord;
+    const CONTEXT *ctx = ptr->ContextRecord;
+    const void *pc, *sp, *fault = NULL;
+    BYTE code[16];
+    ULONG_PTR stack[8];
+    SIZE_T i, count = 0;
+
+    MESSAGE( "wine-crash: begin pid=%04lx tid=%04lx code=%08lx flags=%08lx address=%p\n",
+             GetCurrentProcessId(), GetCurrentThreadId(), rec->ExceptionCode, rec->ExceptionFlags,
+             rec->ExceptionAddress );
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2)
+    {
+        fault = (const void *)rec->ExceptionInformation[1];
+        MESSAGE( "wine-crash: access=%lu target=%p\n", (ULONG)rec->ExceptionInformation[0], fault );
+    }
+
+#ifdef __x86_64__
+    pc = (const void *)ctx->Rip;
+    sp = (const void *)ctx->Rsp;
+    MESSAGE( "wine-crash: rip=%p rsp=%p rbp=%p eflags=%08lx mxcsr=%08lx\n",
+             pc, sp, (void *)ctx->Rbp, ctx->EFlags, ctx->MxCsr );
+    MESSAGE( "wine-crash: rax=%p rbx=%p rcx=%p rdx=%p\n",
+             (void *)ctx->Rax, (void *)ctx->Rbx, (void *)ctx->Rcx, (void *)ctx->Rdx );
+    MESSAGE( "wine-crash: rsi=%p rdi=%p r8=%p r9=%p\n",
+             (void *)ctx->Rsi, (void *)ctx->Rdi, (void *)ctx->R8, (void *)ctx->R9 );
+    MESSAGE( "wine-crash: r10=%p r11=%p r12=%p r13=%p\n",
+             (void *)ctx->R10, (void *)ctx->R11, (void *)ctx->R12, (void *)ctx->R13 );
+    MESSAGE( "wine-crash: r14=%p r15=%p cs=%04x ss=%04x ds=%04x es=%04x fs=%04x gs=%04x\n",
+             (void *)ctx->R14, (void *)ctx->R15, ctx->SegCs, ctx->SegSs, ctx->SegDs, ctx->SegEs,
+             ctx->SegFs, ctx->SegGs );
+#elif defined(__i386__)
+    pc = (const void *)ctx->Eip;
+    sp = (const void *)ctx->Esp;
+    MESSAGE( "wine-crash: eip=%p esp=%p ebp=%p eflags=%08lx\n", pc, sp, (void *)ctx->Ebp, ctx->EFlags );
+    MESSAGE( "wine-crash: eax=%p ebx=%p ecx=%p edx=%p esi=%p edi=%p\n",
+             (void *)ctx->Eax, (void *)ctx->Ebx, (void *)ctx->Ecx, (void *)ctx->Edx,
+             (void *)ctx->Esi, (void *)ctx->Edi );
+    MESSAGE( "wine-crash: cs=%04lx ss=%04lx ds=%04lx es=%04lx fs=%04lx gs=%04lx\n",
+             ctx->SegCs, ctx->SegSs, ctx->SegDs, ctx->SegEs, ctx->SegFs, ctx->SegGs );
+#else
+    pc = rec->ExceptionAddress;
+    sp = NULL;
+#endif
+
+    dump_crash_address( "pc", pc );
+    count = 0;
+    if (!NtReadVirtualMemory( GetCurrentProcess(), pc, code, sizeof(code), &count ) || count)
+    {
+        char bytes[16 * 3 + 1];
+        for (i = 0; i < count; i++) snprintf( bytes + i * 3, 4, "%02x ", code[i] );
+        bytes[count * 3] = 0;
+        MESSAGE( "wine-crash: pc-bytes[%lu]=%s\n", (ULONG)count, bytes );
+    }
+    else MESSAGE( "wine-crash: pc-bytes unreadable\n" );
+    if (fault) dump_crash_address( "target", fault );
+
+    count = 0;
+    if (sp && (!NtReadVirtualMemory( GetCurrentProcess(), sp, stack, sizeof(stack), &count ) || count))
+    {
+        MESSAGE( "wine-crash: stack[%p]:", sp );
+        for (i = 0; i < count / sizeof(*stack); i++) MESSAGE( " %p", (void *)stack[i] );
+        MESSAGE( "\n" );
+    }
+#ifdef __x86_64__
+    /* Private trap-flag emulation counters kept in the TEB by ntdll/unix/signal_x86_64.c (0 when the mode is off). */
+    MESSAGE( "wine-crash: tf state=%lx guest_flags=%lx steps=%I64u\n",
+             *(DWORD *)((BYTE *)NtCurrentTeb() + 0x340), *(DWORD *)((BYTE *)NtCurrentTeb() + 0x344),
+             *(UINT64 *)((BYTE *)NtCurrentTeb() + 0x350) );
+#endif
+    MESSAGE( "wine-crash: end\n" );
+}
+
+
 /******************************************************************
  *		start_debugger
  *
@@ -545,6 +647,7 @@ static BOOL start_debugger( EXCEPTION_POINTERS *epointers, HANDLE event )
 
     format_exception_msg( epointers, buffer, sizeof(buffer) );
     MESSAGE( "wine: %s (thread %04lx), starting debugger...\n", buffer, GetCurrentThreadId() );
+    dump_crash_context( epointers );
 
     InitializeObjectAttributes( &attr, &nameW, 0, 0, NULL );
     if (!NtOpenKey( &dbg_key, KEY_READ, &attr ))
