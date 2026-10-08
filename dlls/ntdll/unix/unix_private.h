@@ -133,7 +133,7 @@ C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, sys
 C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, syscall_trace ) == 0x21c );
 #endif
 
-extern BOOL virtual_wx_fault( void *addr, BOOL in_syscall, BOOL carrier, BOOL *step );
+extern BOOL virtual_wx_fault( void *addr, void *rip, BOOL in_syscall, BOOL carrier, BOOL *step );
 extern void virtual_wx_step(void);
 extern void virtual_wx_cross( void *addr );
 
