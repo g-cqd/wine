@@ -116,6 +116,8 @@ struct ntdll_thread_data
     PRTL_THREAD_START_ROUTINE start;         /* thread entry point */
     void                     *param;         /* thread entry point parameter */
     void                     *jmp_buf;       /* setjmp buffer for exception handling */
+    void                     *wx_page;       /* page opened for one store by WINE_RWX_WX_EMULATION */
+    BOOL                      wx_tf;         /* the trap flag was set by that emulation */
 };
 
 C_ASSERT( sizeof(struct ntdll_thread_data) <= sizeof(((TEB *)0)->GdiTebBatch) );
@@ -128,6 +130,9 @@ C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, sys
 C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, syscall_frame ) == 0x218 );
 C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, syscall_trace ) == 0x21c );
 #endif
+
+extern BOOL virtual_wx_fault( void *addr, BOOL in_syscall, BOOL carrier, BOOL *step );
+extern void virtual_wx_step(void);
 
 static inline struct ntdll_thread_data *ntdll_get_thread_data(void)
 {
