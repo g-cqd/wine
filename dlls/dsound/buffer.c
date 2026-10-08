@@ -1178,6 +1178,7 @@ void secondarybuffer_destroy(IDirectSoundBufferImpl *This)
     if (This->buffer->ref == 0)
         free(This->buffer);
 
+    DSOUND_FreeFirPhases(This);
     free(This->notifies);
     free(This->pwfx);
     free(This->committedbuff);
@@ -1234,6 +1235,7 @@ HRESULT IDirectSoundBufferImpl_Duplicate(
     AcquireSRWLockShared(&pdsb->lock);
 
     CopyMemory(dsb, pdsb, sizeof(*dsb));
+    dsb->fir_phases = NULL;
 
     dsb->pwfx = DSOUND_CopyFormat(pdsb->pwfx);
 

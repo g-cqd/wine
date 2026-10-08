@@ -25,6 +25,10 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <math.h>	/* Insomnia - pow() function */
+#if (defined(__i386__) || defined(__x86_64__)) && !defined(__arm64ec__) && defined(__GNUC__)
+#include <emmintrin.h>
+#define HAVE_FIR_SSE2 1
+#endif
 
 #define COBJMACROS
 
@@ -308,6 +312,155 @@ static UINT cp_fields_noresample(IDirectSoundBufferImpl *dsb, UINT count)
     return count;
 }
 
+/* The interpolated FIR taps used for an output frame only depend on the fractional
+ * input position of that frame, and that position repeats every den / gcd(num, den)
+ * frames. Compute the taps for every such phase once per buffer and frequency
+ * instead of for every output frame. */
+#define MAX_FIR_PHASES 1024
+
+struct fir_phases
+{
+    LONG64 num, den;
+    UINT firstep, gcd, phases, stride;
+    UINT *used;
+    float *coef;
+};
+
+void DSOUND_FreeFirPhases(IDirectSoundBufferImpl *dsb)
+{
+    struct fir_phases *fp = dsb->fir_phases;
+
+    if (!fp) return;
+    dsb->fir_phases = NULL;
+    free(fp->used);
+    free(fp->coef);
+    free(fp);
+}
+
+static LONG64 fir_gcd(LONG64 a, LONG64 b)
+{
+    while (b)
+    {
+        LONG64 t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+/* Returns NULL if no table can be used; the caller then computes the taps per frame.
+ * A table with phases == 0 means that the current frequency has too many phases. */
+static const struct fir_phases *get_fir_phases(IDirectSoundBufferImpl *dsb)
+{
+    UINT firstep = dsb->firstep, phase;
+    LONG64 num = dsb->freqAdjustNum, den = dsb->freqAdjustDen, gcd;
+    struct fir_phases *fp = dsb->fir_phases;
+
+    if (fp && fp->num == num && fp->den == den && fp->firstep == firstep) return fp;
+
+    DSOUND_FreeFirPhases(dsb);
+    if (!(fp = calloc(1, sizeof(*fp)))) return NULL;
+    fp->num = num;
+    fp->den = den;
+    fp->firstep = firstep;
+    gcd = fir_gcd(num, den);
+    if (!gcd || den / gcd > MAX_FIR_PHASES)
+    {
+        dsb->fir_phases = fp;
+        return fp;
+    }
+
+    fp->gcd = gcd;
+    fp->phases = den / gcd;
+    fp->stride = (fir_len + firstep - 2) / firstep;
+    fp->used = calloc(fp->phases, sizeof(*fp->used));
+    fp->coef = calloc((size_t)fp->phases * fp->stride, sizeof(*fp->coef));
+    if (!fp->used || !fp->coef)
+    {
+        free(fp->used);
+        free(fp->coef);
+        free(fp);
+        return NULL;
+    }
+
+    for (phase = 0; phase < fp->phases; phase++)
+    {
+        LONG64 frac = (LONG64)phase * gcd; /* in 1/den input samples, < den */
+        UINT int_fir_steps = frac * firstep / den;
+        float total_fir_steps = frac * firstep / (float)den;
+        UINT idx = firstep - int_fir_steps % firstep - 1;
+        float rem = int_fir_steps + 1.0 - total_fir_steps;
+        float *coef = fp->coef + (size_t)phase * fp->stride;
+        UINT used = 0;
+
+        while (idx < fir_len - 1)
+        {
+            coef[used++] = fir[idx] * (1.0 - rem) + fir[idx + 1] * rem;
+            idx += firstep;
+        }
+        assert(used <= fp->stride);
+        fp->used[phase] = used;
+    }
+
+    dsb->fir_phases = fp;
+    return fp;
+}
+
+static float fir_dot_c(const float *coef, const float *in, UINT count)
+{
+    float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+    UINT j = 0;
+
+    for (; j + 4 <= count; j += 4)
+    {
+        s0 += coef[j] * in[j];
+        s1 += coef[j + 1] * in[j + 1];
+        s2 += coef[j + 2] * in[j + 2];
+        s3 += coef[j + 3] * in[j + 3];
+    }
+    for (; j < count; j++) s0 += coef[j] * in[j];
+    return (s0 + s1) + (s2 + s3);
+}
+
+#ifdef HAVE_FIR_SSE2
+/* The 32-bit PE ABI only guarantees 4-byte stack alignment, so spills of vector
+ * registers need the stack to be realigned in the function that uses them. */
+#ifdef __i386__
+__attribute__((target("sse2"), force_align_arg_pointer))
+#else
+__attribute__((force_align_arg_pointer))
+#endif
+static float fir_dot_sse2(const float *coef, const float *in, UINT count)
+{
+    __m128 s0 = _mm_setzero_ps(), s1 = _mm_setzero_ps();
+    float sum[4], tail = 0.0f;
+    UINT j = 0;
+
+    for (; j + 8 <= count; j += 8)
+    {
+        s0 = _mm_add_ps(s0, _mm_mul_ps(_mm_loadu_ps(coef + j), _mm_loadu_ps(in + j)));
+        s1 = _mm_add_ps(s1, _mm_mul_ps(_mm_loadu_ps(coef + j + 4), _mm_loadu_ps(in + j + 4)));
+    }
+    if (j + 4 <= count)
+    {
+        s0 = _mm_add_ps(s0, _mm_mul_ps(_mm_loadu_ps(coef + j), _mm_loadu_ps(in + j)));
+        j += 4;
+    }
+    _mm_storeu_ps(sum, _mm_add_ps(s0, s1));
+    for (; j < count; j++) tail += coef[j] * in[j];
+    return ((sum[0] + sum[1]) + (sum[2] + sum[3])) + tail;
+}
+
+static BOOL fir_have_sse2(void)
+{
+#ifdef __x86_64__
+    return TRUE;
+#else
+    return IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE);
+#endif
+}
+#endif /* HAVE_FIR_SSE2 */
+
 static UINT cp_fields_resample(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *freqAccNum)
 {
     UINT i, channel;
@@ -324,6 +477,8 @@ static UINT cp_fields_resample(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *
     UINT fir_cachesize = (fir_len + dsbfirstep - 2) / dsbfirstep;
     UINT required_input = max_ipos + fir_cachesize;
     float *intermediate, *fir_copy, *itmp;
+    const struct fir_phases *fp;
+    float (*dot)(const float *coef, const float *in, UINT count);
 
     DWORD len = required_input * channels;
     len += fir_cachesize;
@@ -364,11 +519,34 @@ static UINT cp_fields_resample(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *
                     dsb->buflen, dsb->sec_mixpos + i * istride, channel);
     }
 
-    for(i = 0; i < count; ++i) {
-        UINT int_fir_steps = (freqAcc_start + i * dsb->freqAdjustNum) * dsbfirstep / dsb->freqAdjustDen;
-        float total_fir_steps = (freqAcc_start + i * dsb->freqAdjustNum) * dsbfirstep / (float)dsb->freqAdjustDen;
-        UINT ipos = int_fir_steps / dsbfirstep;
+    fp = get_fir_phases(dsb);
+#ifdef HAVE_FIR_SSE2
+    dot = fir_have_sse2() ? fir_dot_sse2 : fir_dot_c;
+#else
+    dot = fir_dot_c;
+#endif
 
+    for(i = 0; i < count; ++i) {
+        LONG64 acc = freqAcc_start + i * dsb->freqAdjustNum;
+        LONG64 frac = acc % dsb->freqAdjustDen;
+        UINT ipos = acc / dsb->freqAdjustDen;
+
+        if (fp && fp->phases && !(frac % fp->gcd)) {
+            UINT phase = frac / fp->gcd, fir_used = fp->used[phase];
+            const float *coef = fp->coef + (size_t)phase * fp->stride;
+
+            assert(ipos + fir_used <= required_input);
+
+            for (channel = 0; channel < dsb->mix_channels; channel++) {
+                const float *cache = &intermediate[channel * required_input + ipos];
+                dsb->put(dsb, i * ostride, channel, dot(coef, cache, fir_used) * dsb->firgain);
+            }
+            continue;
+        }
+
+        {
+        UINT int_fir_steps = acc * dsbfirstep / dsb->freqAdjustDen;
+        float total_fir_steps = acc * dsbfirstep / (float)dsb->freqAdjustDen;
         UINT idx = (ipos + 1) * dsbfirstep - int_fir_steps - 1;
         float rem = int_fir_steps + 1.0 - total_fir_steps;
 
@@ -388,6 +566,7 @@ static UINT cp_fields_resample(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *
             for (j = 0; j < fir_used; j++)
                 sum += fir_copy[j] * cache[j];
             dsb->put(dsb, i * ostride, channel, sum * dsb->firgain);
+        }
         }
     }
 
