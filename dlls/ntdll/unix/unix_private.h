@@ -118,6 +118,8 @@ struct ntdll_thread_data
     void                     *jmp_buf;       /* setjmp buffer for exception handling */
     void                     *wx_page;       /* page opened for one store by WINE_RWX_WX_EMULATION */
     BOOL                      wx_tf;         /* the trap flag was set by that emulation */
+    BOOL                      wx_swallow;    /* the window was closed after its store ran: one step trap is still in flight */
+    void                     *wx_rip;        /* instruction the open window is for */
 };
 
 C_ASSERT( sizeof(struct ntdll_thread_data) <= sizeof(((TEB *)0)->GdiTebBatch) );
@@ -133,6 +135,7 @@ C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, sys
 
 extern BOOL virtual_wx_fault( void *addr, BOOL in_syscall, BOOL carrier, BOOL *step );
 extern void virtual_wx_step(void);
+extern void virtual_wx_cross( void *addr );
 
 static inline struct ntdll_thread_data *ntdll_get_thread_data(void)
 {
