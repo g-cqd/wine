@@ -552,6 +552,190 @@ static void dump_crash_address( const char *label, const void *addr )
 }
 
 
+/* One MemoryBasicInformation line for the page at addr (allocation history of the page and its neighbours). */
+static void dump_crash_vq( const void *addr )
+{
+    MEMORY_BASIC_INFORMATION info;
+    SIZE_T len;
+
+    if (NtQueryVirtualMemory( GetCurrentProcess(), addr, MemoryBasicInformation, &info, sizeof(info), &len ))
+    {
+        MESSAGE( "wine-crash: vq[%p] not queryable\n", addr );
+        return;
+    }
+    MESSAGE( "wine-crash: vq[%p] alloc=%p aprot=%lx base=%p size=%p state=%lx prot=%lx type=%lx\n", addr,
+             info.AllocationBase, info.AllocationProtect, info.BaseAddress, (void *)info.RegionSize,
+             info.State, info.Protect, info.Type );
+}
+
+/* Hex rows of 32 bytes covering [center - before, center + after), aligned to 32; unreadable rows are merged. */
+static void dump_crash_window( const char *label, ULONG_PTR center, SIZE_T before, SIZE_T after )
+{
+    ULONG_PTR start = (center - before) & ~(ULONG_PTR)31, end = (center + after + 31) & ~(ULONG_PTR)31, a, bad = 0;
+    BYTE row[32];
+    SIZE_T n, i;
+    char text[32 * 3 + 1];
+
+    MESSAGE( "wine-crash: window %s=%p span=-%lx..+%lx\n", label, (void *)center, (ULONG)before, (ULONG)after );
+    for (a = start; a < end; a += 32)
+    {
+        n = 0;
+        if (NtReadVirtualMemory( GetCurrentProcess(), (void *)a, row, sizeof(row), &n ) || n != sizeof(row))
+        {
+            if (!bad) bad = a;
+            continue;
+        }
+        if (bad)
+        {
+            MESSAGE( "wine-crash: code[%p..%p]: unreadable\n", (void *)bad, (void *)(a - 1) );
+            bad = 0;
+        }
+        for (i = 0; i < sizeof(row); i++) snprintf( text + i * 3, 4, "%02x ", row[i] );
+        text[sizeof(row) * 3 - 1] = 0;
+        MESSAGE( "wine-crash: code[%p]: %s\n", (void *)a, text );
+    }
+    if (bad) MESSAGE( "wine-crash: code[%p..%p]: unreadable\n", (void *)bad, (void *)(end - 1) );
+}
+
+/* Checksum of the 4 KiB page holding pc, so two crashes can be compared for identical page content. */
+static void dump_crash_page_sum( ULONG_PTR pc )
+{
+    ULONG_PTR page = pc & ~(ULONG_PTR)0xfff;
+    BYTE *buf = NULL;
+    SIZE_T size = 0x1000, n = 0, i, j;
+    UINT64 hash = 0xcbf29ce484222325ull;
+    ULONG zero16 = 0;
+
+    if (NtAllocateVirtualMemory( GetCurrentProcess(), (void **)&buf, 0, &size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE ))
+        return;
+    if (NtReadVirtualMemory( GetCurrentProcess(), (void *)page, buf, 0x1000, &n ) || n != 0x1000)
+    {
+        MESSAGE( "wine-crash: pagesum %p unreadable\n", (void *)page );
+    }
+    else
+    {
+        for (i = 0; i < 0x1000; i++) hash = (hash ^ buf[i]) * 0x100000001b3ull;
+        for (i = 0; i < 0x1000; i += 16)
+        {
+            for (j = 0; j < 16 && !buf[i + j]; j++) ;
+            if (j == 16) zero16++;
+        }
+        MESSAGE( "wine-crash: pagesum %p fnv1a64=%016I64x zero16=%lu/256\n", (void *)page, hash, zero16 );
+    }
+    size = 0;
+    NtFreeVirtualMemory( GetCurrentProcess(), (void **)&buf, &size, MEM_RELEASE );
+}
+
+/* Thread count of this process and the faulting thread's TEB. */
+static void dump_crash_threads(void)
+{
+    SYSTEM_PROCESS_INFORMATION *cur;
+    SIZE_T size = 0x100000;
+    void *buf = NULL;
+    ULONG len = 0, count = 0;
+    BOOL found = FALSE;
+
+    if (!NtAllocateVirtualMemory( GetCurrentProcess(), &buf, 0, &size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE ))
+    {
+        if (!NtQuerySystemInformation( SystemProcessInformation, buf, size, &len ))
+        {
+            cur = buf;
+            for (;;)
+            {
+                if (cur->UniqueProcessId == ULongToHandle( GetCurrentProcessId() ))
+                {
+                    count = cur->dwThreadCount;
+                    found = TRUE;
+                    break;
+                }
+                if (!cur->NextEntryOffset) break;
+                cur = (SYSTEM_PROCESS_INFORMATION *)((char *)cur + cur->NextEntryOffset);
+            }
+        }
+        size = 0;
+        NtFreeVirtualMemory( GetCurrentProcess(), &buf, &size, MEM_RELEASE );
+    }
+    if (found) MESSAGE( "wine-crash: threads=%lu teb=%p\n", count, NtCurrentTeb() );
+    else MESSAGE( "wine-crash: threads=? teb=%p\n", NtCurrentTeb() );
+}
+
+/* The first few stack slots that look like return addresses: executable memory inside a module. */
+static void dump_crash_returns( const void *sp )
+{
+    ULONG_PTR slots[64];
+    SIZE_T n = 0, i, printed = 0;
+    MEMORY_BASIC_INFORMATION info;
+    WCHAR name[MAX_PATH];
+    HMODULE module;
+    const WCHAR *base;
+    SIZE_T len;
+
+    if (!sp || (NtReadVirtualMemory( GetCurrentProcess(), sp, slots, sizeof(slots), &n ) && !n)) return;
+    for (i = 0; i < n / sizeof(*slots) && printed < 6; i++)
+    {
+        if (NtQueryVirtualMemory( GetCurrentProcess(), (void *)slots[i], MemoryBasicInformation, &info, sizeof(info), &len ) ||
+            info.State != MEM_COMMIT || !(info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                                                          PAGE_EXECUTE_WRITECOPY)))
+            continue;
+        if (!GetModuleHandleExW( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                 (void *)slots[i], &module ) || !GetModuleFileNameW( module, name, ARRAY_SIZE(name) ))
+            continue;
+        if ((base = wcsrchr( name, '\\' ))) base++;
+        else base = name;
+        MESSAGE( "wine-crash: ret[%lu]=%p %ls+%#lx\n", (ULONG)i, (void *)slots[i], base,
+                 (ULONG)(slots[i] - (ULONG_PTR)module) );
+        printed++;
+    }
+}
+
+/* Code around pc and around every register that points near it, then the page history and checksum. */
+static void dump_crash_pages( const CONTEXT *ctx, ULONG_PTR pc, const void *sp )
+{
+    struct { const char *name; ULONG_PTR value; } regs[16];
+    unsigned int nregs = 0, i, windows = 0, near = 0;
+    char nearbuf[160] = "";
+    MEMORY_BASIC_INFORMATION info;
+    SIZE_T len;
+
+#define REG(n,f) (regs[nregs].name = n, regs[nregs++].value = ctx->f)
+#ifdef __x86_64__
+    REG("rax",Rax); REG("rbx",Rbx); REG("rcx",Rcx); REG("rdx",Rdx); REG("rsi",Rsi); REG("rdi",Rdi); REG("rbp",Rbp);
+    REG("r8",R8); REG("r9",R9); REG("r10",R10); REG("r11",R11); REG("r12",R12); REG("r13",R13); REG("r14",R14); REG("r15",R15);
+#elif defined(__i386__)
+    REG("eax",Eax); REG("ebx",Ebx); REG("ecx",Ecx); REG("edx",Edx); REG("esi",Esi); REG("edi",Edi); REG("ebp",Ebp);
+#endif
+#undef REG
+
+    dump_crash_vq( (void *)(pc & ~(ULONG_PTR)0xfff) );
+    dump_crash_vq( (void *)((pc & ~(ULONG_PTR)0xfff) - 0x1000) );
+    dump_crash_vq( (void *)((pc & ~(ULONG_PTR)0xfff) + 0x1000) );
+    dump_crash_page_sum( pc );
+    dump_crash_threads();
+    dump_crash_returns( sp );
+    dump_crash_window( "pc", pc, 256, 256 );
+
+    for (i = 0; i < nregs; i++)
+    {
+        ULONG_PTR v = regs[i].value, diff = v > pc ? v - pc : pc - v;
+        if (diff >= 0x1000) continue;
+        if (diff <= 256)
+        {
+            size_t used = strlen( nearbuf );
+            snprintf( nearbuf + used, sizeof(nearbuf) - used, " %s=pc%c%#lx", regs[i].name,
+                      v >= pc ? '+' : '-', (ULONG)diff );
+            near++;
+            continue;
+        }
+        if (windows >= 3 || NtQueryVirtualMemory( GetCurrentProcess(), (void *)v, MemoryBasicInformation, &info,
+                                                  sizeof(info), &len ) || info.State != MEM_COMMIT ||
+            (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            continue;
+        dump_crash_window( regs[i].name, v, 64, 64 );
+        windows++;
+    }
+    if (near) MESSAGE( "wine-crash: near-pc:%s\n", nearbuf );
+}
+
 /* Print a compact register / memory snapshot of the faulting thread, one "wine-crash:" line each. */
 static void dump_crash_context( const EXCEPTION_POINTERS *ptr )
 {
@@ -624,6 +808,7 @@ static void dump_crash_context( const EXCEPTION_POINTERS *ptr )
              *(DWORD *)((BYTE *)NtCurrentTeb() + 0x340), *(DWORD *)((BYTE *)NtCurrentTeb() + 0x344),
              *(UINT64 *)((BYTE *)NtCurrentTeb() + 0x350) );
 #endif
+    dump_crash_pages( ctx, (ULONG_PTR)pc, sp );
     MESSAGE( "wine-crash: end\n" );
 }
 
