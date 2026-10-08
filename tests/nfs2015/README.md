@@ -55,3 +55,11 @@ winedbg only reports `Couldn't get first exception`. Build and run:
 
 Expect `ok   crash-context block complete`. winedbg is still started afterwards and may wait for input when
 stdin is not a terminal; kill it, the child's exit status stays `c0000005`.
+
+`crash-context.exe page` is the second case: the child allocates an executable private page, fills it with junk
+whose bytes at offset 0x159 are the ones seen on `NFS16.exe` (`a2 31 ff 73 01 85 35 bc ...`, a `mov [moffs64],al`
+whose operand is the "bad pointer"), sets `r12` near it and jumps in. `crash-context-check.sh crash-context.exe page`
+passes when the block also carries the page history (`vq[...]`), the page checksum (`pagesum ... fnv1a64=`, compared with
+the value the child prints), the thread count, the code rows (`code[...]`, 32 bytes each, +-256 around pc and +-64 around
+other registers that point within 4 KiB of pc), the registers that sit inside the pc window (`near-pc:`) and the
+return-address-like stack slots (`ret[n]=addr module+offset`).
