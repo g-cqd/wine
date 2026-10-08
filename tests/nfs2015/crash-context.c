@@ -2,7 +2,8 @@
  * Fixture for the "wine-crash:" register dump printed by UnhandledExceptionFilter.
  *
  * Build:  x86_64-w64-mingw32-gcc -O1 -o crash-context.exe crash-context.c
- * Run:    crash-context-check.sh /path/to/wine crash-context.exe
+ * Run:    crash-context-check.sh /path/to/wine crash-context.exe        (register values)
+ *         crash-context-check.sh /path/to/wine crash-context.exe page   (junk executable page, page/code rows)
  *
  * With no argument the program starts itself with "fault" and waits.  The child loads
  * known values into the integer registers and stores through a non-canonical pointer,
@@ -36,6 +37,24 @@ static void __attribute__((noreturn)) fault( void )
     __builtin_unreachable();
 }
 
+/* Executable private page whose code is junk, the shape of the NFS16 fault: jump into the middle of it. */
+static void __attribute__((noreturn)) page_fault( void )
+{
+    static const unsigned char junk[16] = { 0xa2, 0x31, 0xff, 0x73, 0x01, 0x85, 0x35, 0xbc,
+                                            0x85, 0xe8, 0xac, 0x52, 0x48, 0x8d, 0x15, 0xba };
+    unsigned char *page = VirtualAlloc( NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE );
+    unsigned long long hash = 0xcbf29ce484222325ull;
+    unsigned int i;
+
+    for (i = 0; i < 0x1000; i++) page[i] = (i % 16 == 0 || i % 7 == 0) ? 0 : (unsigned char)(i * 31 + 7);
+    memcpy( page + 0x159, junk, sizeof(junk) );
+    for (i = 0; i < 0x1000; i++) hash = (hash ^ page[i]) * 0x100000001b3ull;
+    printf( "expect page=%p fnv1a64=%016llx pc=%p\n", page, hash, page + 0x159 );
+    fflush( stdout );
+    __asm__ volatile( "movq %0,%%r12\n\tjmp *%1\n\t" :: "r"(page + 0xe3), "r"(page + 0x159) : "r12" );
+    __builtin_unreachable();
+}
+
 int main( int argc, char **argv )
 {
     STARTUPINFOA si = { sizeof(si) };
@@ -44,8 +63,9 @@ int main( int argc, char **argv )
     DWORD status = 0;
 
     if (argc > 1 && !strcmp( argv[1], "fault" )) fault();
+    if (argc > 1 && !strcmp( argv[1], "pagefault" )) page_fault();
 
-    snprintf( cmd, sizeof(cmd), "\"%s\" fault", argv[0] );
+    snprintf( cmd, sizeof(cmd), "\"%s\" %s", argv[0], argc > 1 && !strcmp( argv[1], "page" ) ? "pagefault" : "fault" );
     if (!CreateProcessA( NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi ))
     {
         printf( "FAIL CreateProcess %lu\n", GetLastError() );
