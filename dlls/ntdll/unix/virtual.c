@@ -59,6 +59,7 @@
 # include <libprocstat.h>
 #endif
 #include <unistd.h>
+#include <time.h>
 #include <dlfcn.h>
 #ifdef HAVE_VALGRIND_VALGRIND_H
 # include <valgrind/valgrind.h>
@@ -1784,6 +1785,9 @@ static void unregister_view( struct file_view *view )
 }
 
 
+static void wx_forget( void *base, size_t size );  /* WINE_RWX_WX_EMULATION, see below */
+static void wx_open_for_kernel( char *page, BYTE vprot );
+
 /***********************************************************************
  *           delete_view
  *
@@ -1792,6 +1796,7 @@ static void unregister_view( struct file_view *view )
 static void delete_view( struct file_view *view ) /* [in] View */
 {
     if (!(view->protect & VPROT_SYSTEM)) unmap_area( view->base, view->size );
+    wx_forget( view->base, view->size );
     set_page_vprot( view->base, view->size, 0 );
     if (view->protect & VPROT_ARM64EC) clear_arm64ec_range( view->base, view->size );
     unregister_view( view );
@@ -1925,6 +1930,197 @@ static NTSTATUS get_vprot_flags( DWORD protect, unsigned int *vprot, BOOL image 
 }
 
 
+#if defined(__APPLE__) && defined(__x86_64__)
+static int is_apple_silicon(void);
+
+/* WINE_RWX_WX_EMULATION=1 (default off): W^X emulation for private PAGE_EXECUTE_READWRITE pages.
+ *
+ * Rosetta translates guest code lazily, a run of instructions at a time. When the guest writes the
+ * bytes of an instruction that lies right ahead of the instruction pointer (inside the translated
+ * run) Rosetta may resume at a stale instruction boundary, so execution continues in the middle of
+ * the instruction that was just built. Seen in NFS (2015): a private RWX page at 0x1B30000 builds a
+ * CPUID instruction with two successive stores (mov word [rip+9],0xF090; xor word [rip+0],0x529F;
+ * 0xF090 ^ 0x529F = 0xA20F, i.e. "0F A2") and falls into it; Rosetta resumes at the second byte and
+ * the process dies with a write access violation to the operand of the decoded "a2" opcode.
+ * Reproducer: the same stub in a freestanding program fails 100% of the time, with and without Wine.
+ *
+ * With the switch on, a private committed page whose Windows protection is RWX is mapped R+X on the
+ * host. A store faults; the handler opens the page for exactly one instruction (the trap flag is
+ * set), and the single-step trap closes it again, so Rosetta sees every store as a separate event
+ * and retranslates before the next instruction. Pages written by Wine itself (a fault inside host
+ * code), pages that fault too often (data mixed with code) and every fault while the trap-flag
+ * emulation is active are released: the page stays writable until its protection changes or it is
+ * freed, which is the behaviour without the switch. Image sections and file views are never touched. */
+#define WX_RELEASED_MAX   16
+#define WX_HOT_MAX        8
+#define WX_HOT_LIMIT      300         /* default: this many faults on one page ... */
+#define WX_HOT_WINDOW_NS  100000000ULL /* ... within this time release the page (WINE_RWX_WX_HOT_LIMIT, 0 = never) */
+
+static struct { char *page; BYTE vprot; } wx_released[WX_RELEASED_MAX];
+static struct { char *page; unsigned int count; unsigned long long start; } wx_hot[WX_HOT_MAX];
+static struct { unsigned int guest, host, carrier, hot, steps; } wx_stats;
+static int wx_mode = -1, wx_announced;
+static unsigned int wx_hot_limit = WX_HOT_LIMIT, wx_released_next;
+
+static BOOL wx_emulation(void)
+{
+    if (wx_mode < 0)
+    {
+        const char *e = getenv( "WINE_RWX_WX_EMULATION" ), *l = getenv( "WINE_RWX_WX_HOT_LIMIT" );
+        wx_mode = (e && e[0] == '1' && !e[1] && is_apple_silicon()) ? 1 : 0;
+        if (l) wx_hot_limit = strtoul( l, NULL, 10 );
+    }
+    return wx_mode;
+}
+
+static BOOL wx_eligible( char *page, BYTE vprot )
+{
+    const BYTE need = VPROT_COMMITTED | VPROT_READ | VPROT_WRITE | VPROT_EXEC;
+    struct file_view *view;
+    unsigned int i;
+
+    if (!wx_emulation()) return FALSE;
+    if ((vprot & need) != need || (vprot & (VPROT_GUARD | VPROT_WRITEWATCH | VPROT_WRITECOPY))) return FALSE;
+    if (!(view = find_view( page, 0 )) || !is_view_valloc( view ) ||
+        (view->protect & (VPROT_SYSTEM | VPROT_PLACEHOLDER))) return FALSE;
+    for (i = 0; i < WX_RELEASED_MAX; i++)
+    {
+        if (wx_released[i].page != page) continue;
+        if (wx_released[i].vprot == vprot) return FALSE;
+        wx_released[i].page = NULL;  /* the protection changed since: evaluate again */
+    }
+    if (!wx_announced)
+    {
+        char buf[96];
+        int len = snprintf( buf, sizeof(buf), "wine-rwx: active pid=%u first page %p\n", (unsigned int)getpid(), page );
+        wx_announced = 1;
+        write( 2, buf, len );
+    }
+    return TRUE;
+}
+
+static int wx_unix_prot( char *page, BYTE vprot )
+{
+    int prot = get_unix_prot( vprot );
+    if (wx_eligible( page, vprot )) prot &= ~PROT_WRITE;
+    return prot;
+}
+
+static void wx_release( char *page, BYTE vprot )
+{
+    wx_released[wx_released_next % WX_RELEASED_MAX].page = page;
+    wx_released[wx_released_next % WX_RELEASED_MAX].vprot = vprot;
+    wx_released_next++;
+    mprotect( page, host_page_size, PROT_READ | PROT_WRITE | PROT_EXEC );
+}
+
+/* a read()/recvmsg()/server reply is about to write into the page: the kernel reports EFAULT instead of
+ * faulting, so the page is released (kept writable) like a page written from host code */
+static void wx_open_for_kernel( char *page, BYTE vprot )
+{
+    if (wx_mode > 0 && wx_eligible( page, vprot ))
+    {
+        wx_stats.host++;
+        wx_release( page, vprot );
+    }
+}
+
+static void wx_forget( void *base, size_t size )
+{
+    unsigned int i;
+    if (wx_mode <= 0) return;
+    for (i = 0; i < WX_RELEASED_MAX; i++)
+        if ((char *)wx_released[i].page >= (char *)base && (char *)wx_released[i].page < (char *)base + size)
+            wx_released[i].page = NULL;
+    for (i = 0; i < WX_HOT_MAX; i++)
+        if ((char *)wx_hot[i].page >= (char *)base && (char *)wx_hot[i].page < (char *)base + size)
+            wx_hot[i].page = NULL;
+}
+
+static BOOL wx_page_is_hot( char *page )
+{
+    struct timespec ts;
+    unsigned long long now;
+    unsigned int i, slot = 0;
+
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    now = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+    for (i = 0; i < WX_HOT_MAX; i++)
+    {
+        if (wx_hot[i].page == page) { slot = i; goto found; }
+        if (!wx_hot[i].page || wx_hot[i].start < wx_hot[slot].start) slot = i;
+    }
+    wx_hot[slot].page = page;
+    wx_hot[slot].count = 0;
+    wx_hot[slot].start = now;
+found:
+    if (now - wx_hot[slot].start > WX_HOT_WINDOW_NS) { wx_hot[slot].count = 0; wx_hot[slot].start = now; }
+    return wx_hot_limit && ++wx_hot[slot].count > wx_hot_limit;
+}
+
+/* called from the SIGSEGV handler for every page fault before anything else sees it;
+ * returns TRUE if the fault was a store to an emulated W^X page and has been dealt with */
+BOOL virtual_wx_fault( void *addr, BOOL in_syscall, BOOL carrier, BOOL *step )
+{
+    char *page = ROUND_ADDR( addr, host_page_mask );
+    BOOL handled = FALSE;
+    BYTE vprot;
+
+    *step = FALSE;
+    if (!wx_emulation()) return FALSE;
+    mutex_lock( &virtual_mutex );  /* no need for signal masking inside signal handler */
+    vprot = get_host_page_vprot( page );
+    if (wx_eligible( page, vprot ))
+    {
+        if (in_syscall) { wx_stats.host++; wx_release( page, vprot ); }
+        else if (carrier) { wx_stats.carrier++; wx_release( page, vprot ); }
+        else if (wx_page_is_hot( page )) { wx_stats.hot++; wx_release( page, vprot ); }
+        else
+        {
+            wx_stats.guest++;
+            ntdll_get_thread_data()->wx_page = page;
+            mprotect( page, host_page_size, PROT_READ | PROT_WRITE | PROT_EXEC );
+            *step = TRUE;
+        }
+        handled = TRUE;
+    }
+    mutex_unlock( &virtual_mutex );
+    return handled;
+}
+
+/* the single-step trap after the store: close the page again */
+void virtual_wx_step(void)
+{
+    struct ntdll_thread_data *td = ntdll_get_thread_data();
+    char *page = td->wx_page;
+
+    if (!page) return;
+    td->wx_page = NULL;
+    mutex_lock( &virtual_mutex );
+    wx_stats.steps++;
+    mprotect( page, host_page_size, wx_unix_prot( page, get_host_page_vprot( page )) );
+    mutex_unlock( &virtual_mutex );
+}
+
+static void __attribute__((destructor)) wx_report(void)
+{
+    char buf[160];
+    int len;
+
+    if (wx_mode <= 0 || !(wx_stats.guest | wx_stats.host | wx_stats.carrier | wx_stats.hot)) return;
+    len = snprintf( buf, sizeof(buf), "wine-rwx: pid=%u stores=%u released(host=%u carrier=%u hot=%u)\n",
+                    (unsigned int)getpid(),
+                    wx_stats.guest, wx_stats.host, wx_stats.carrier, wx_stats.hot );
+    write( 2, buf, len );
+}
+#else
+static inline BOOL wx_emulation(void) { return FALSE; }
+static inline int wx_unix_prot( char *page, BYTE vprot ) { return get_unix_prot( vprot ); }
+static void wx_forget( void *base, size_t size ) { }
+static void wx_open_for_kernel( char *page, BYTE vprot ) { }
+#endif
+
+
 /***********************************************************************
  *           mprotect_exec
  *
@@ -1959,11 +2155,11 @@ static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear )
     size = ROUND_SIZE( base, size, host_page_mask );
 
     vprot = get_host_page_vprot( addr );
-    prot = get_unix_prot( (vprot & ~clear) | set );
+    prot = wx_unix_prot( addr, (vprot & ~clear) | set );
     for (count = i = 1; i < size / host_page_size; i++, count++)
     {
         vprot = get_host_page_vprot( addr + count * host_page_size );
-        next = get_unix_prot( (vprot & ~clear) | set );
+        next = wx_unix_prot( addr + count * host_page_size, (vprot & ~clear) | set );
         if (next == prot) continue;
         if (mprotect_exec( addr, count * host_page_size, prot )) return -1;
         addr += count * host_page_size;
@@ -4698,6 +4894,7 @@ static NTSTATUS check_write_access( void *base, size_t size, BOOL *has_write_wat
         if (vprot & VPROT_WRITEWATCH) *has_write_watch = TRUE;
         if (!(get_unix_prot( vprot & ~VPROT_WRITEWATCH ) & PROT_WRITE))
             return STATUS_INVALID_USER_BUFFER;
+        wx_open_for_kernel( addr + i, vprot );
     }
     if (*has_write_watch)
         mprotect_range( addr, size, 0, VPROT_WRITEWATCH );  /* temporarily enable write access */
