@@ -767,8 +767,12 @@ static WORD get_pe_file_machine( const char *path )
  */
 const char *get_x87_sidecar_path(void)
 {
-    const char *path = getenv( "ROSETTA_X87_PATH" );
+    const char *path;
 
+#ifdef __aarch64__
+    return NULL;  /* no x87sidecar on a native arm64 Wine: x86 code runs in the WoW64 CPU backend, not Rosetta */
+#endif
+    path = getenv( "ROSETTA_X87_PATH" );
     if (path) return *path ? path : NULL;
 #if defined(__APPLE__) && defined(__x86_64__)
     {
