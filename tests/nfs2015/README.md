@@ -63,3 +63,11 @@ passes when the block also carries the page history (`vq[...]`), the page checks
 the value the child prints), the thread count, the code rows (`code[...]`, 32 bytes each, +-256 around pc and +-64 around
 other registers that point within 4 KiB of pc), the registers that sit inside the pc window (`near-pc:`) and the
 return-address-like stack slots (`ret[n]=addr module+offset`).
+
+`exec-page-stale.c` is the executable-page probe for the Rosetta route (patch 0007): four cases that build
+`mov eax,N; ret` in a private page at 0x50000000, run it, rewrite N in place and run it again, printing
+`case <name> first=<n> second=<n> stale=<0|1> rounds=<n> bad=<n>`. Run it plain and with `WINE_ROSETTA_FLUSH_TOGGLE=1`,
+`WINE_ROSETTA_PROTECT_TOGGLE=1` and `WINE_TRACE_PAGE=50000000-50010000` to compare. On the Wine 11.0 / Rosetta runtime
+of 2026-10-08 no stale execution was observed with every switch off (5000 rounds per case), so the probe documents
+the switches rather than a reproduction.
+

@@ -4037,6 +4037,8 @@ static TEB *init_teb( void *ptr, BOOL is_wow )
 }
 
 
+static volatile int trace_teb_ready;  /* patch 0007: the TEB can be read for tid/pid in wine-trace lines */
+
 /***********************************************************************
  *           virtual_alloc_first_teb
  */
@@ -4068,6 +4070,7 @@ TEB *virtual_alloc_first_teb(void)
     teb = init_teb( ptr, FALSE );
     pthread_key_create( &teb_key, NULL );
     pthread_setspecific( teb_key, teb );
+    trace_teb_ready = 1;
     return teb;
 }
 
@@ -5284,7 +5287,7 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
  *             NtAllocateVirtualMemory   (NTDLL.@)
  *             ZwAllocateVirtualMemory   (NTDLL.@)
  */
-NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits,
+static NTSTATUS real_NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits,
                                          SIZE_T *size_ptr, ULONG type, ULONG protect )
 {
     static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH | MEM_RESET;
@@ -5422,7 +5425,7 @@ static NTSTATUS get_extended_params( const MEM_EXTENDED_PARAMETER *parameters, U
  *             NtAllocateVirtualMemoryEx   (NTDLL.@)
  *             ZwAllocateVirtualMemoryEx   (NTDLL.@)
  */
-NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *size_ptr, ULONG type,
+static NTSTATUS real_NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *size_ptr, ULONG type,
                                            ULONG protect, MEM_EXTENDED_PARAMETER *parameters,
                                            ULONG count )
 {
@@ -5482,7 +5485,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *s
  *             NtFreeVirtualMemory   (NTDLL.@)
  *             ZwFreeVirtualMemory   (NTDLL.@)
  */
-NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr, ULONG type )
+static NTSTATUS real_NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr, ULONG type )
 {
     struct file_view *view;
     char *base;
@@ -5574,7 +5577,7 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
  *             NtProtectVirtualMemory   (NTDLL.@)
  *             ZwProtectVirtualMemory   (NTDLL.@)
  */
-NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr,
+static NTSTATUS real_NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr,
                                         ULONG new_prot, ULONG *old_prot )
 {
     struct file_view *view;
@@ -6324,7 +6327,7 @@ NTSTATUS WINAPI NtUnlockVirtualMemory( HANDLE process, PVOID *addr, SIZE_T *size
  *             NtMapViewOfSection   (NTDLL.@)
  *             ZwMapViewOfSection   (NTDLL.@)
  */
-NTSTATUS WINAPI NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_ptr, ULONG_PTR zero_bits,
+static NTSTATUS real_NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_ptr, ULONG_PTR zero_bits,
                                     SIZE_T commit_size, const LARGE_INTEGER *offset_ptr, SIZE_T *size_ptr,
                                     SECTION_INHERIT inherit, ULONG alloc_type, ULONG protect )
 {
@@ -6401,7 +6404,7 @@ NTSTATUS WINAPI NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_p
  *             NtMapViewOfSectionEx   (NTDLL.@)
  *             ZwMapViewOfSectionEx   (NTDLL.@)
  */
-NTSTATUS WINAPI NtMapViewOfSectionEx( HANDLE handle, HANDLE process, PVOID *addr_ptr,
+static NTSTATUS real_NtMapViewOfSectionEx( HANDLE handle, HANDLE process, PVOID *addr_ptr,
                                       const LARGE_INTEGER *offset_ptr, SIZE_T *size_ptr,
                                       ULONG alloc_type, ULONG protect,
                                       MEM_EXTENDED_PARAMETER *parameters, ULONG count )
@@ -6548,7 +6551,7 @@ done:
  *             NtUnmapViewOfSection   (NTDLL.@)
  *             ZwUnmapViewOfSection   (NTDLL.@)
  */
-NTSTATUS WINAPI NtUnmapViewOfSection( HANDLE process, PVOID addr )
+static NTSTATUS real_NtUnmapViewOfSection( HANDLE process, PVOID addr )
 {
     return unmap_view_of_section( process, addr, 0 );
 }
@@ -6557,7 +6560,7 @@ NTSTATUS WINAPI NtUnmapViewOfSection( HANDLE process, PVOID addr )
  *             NtUnmapViewOfSectionEx   (NTDLL.@)
  *             ZwUnmapViewOfSectionEx   (NTDLL.@)
  */
-NTSTATUS WINAPI NtUnmapViewOfSectionEx( HANDLE process, PVOID addr, ULONG flags )
+static NTSTATUS real_NtUnmapViewOfSectionEx( HANDLE process, PVOID addr, ULONG flags )
 {
     static const ULONG type_mask = MEM_UNMAP_WITH_TRANSIENT_BOOST | MEM_PRESERVE_PLACEHOLDER;
 
@@ -6888,6 +6891,154 @@ static void toggle_executable_pages_for_rosetta( HANDLE process, void *addr, SIZ
 }
 #endif
 
+/* Patch 0007: experiment switches for the executable-page defect seen on the Rosetta route, all off by default.
+ *   WINE_ROSETTA_FLUSH_TOGGLE=1    NtFlushInstructionCache re-toggles the executable pages of the range
+ *   WINE_ROSETTA_PROTECT_TOGGLE=1  NtProtectVirtualMemory re-toggles the range when it gains an execute bit
+ *   WINE_TRACE_PAGE=<hexstart>-<hexend>  numeric "wine-trace:" lines for calls that touch the window
+ * The environment is read once, on first use. */
+#define ROSETTA_EXEC_BITS (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)
+
+static volatile int rosetta_switches_state;   /* 0 unread, 1 read */
+static int rosetta_flush_toggle, rosetta_protect_toggle, trace_page_on;
+static ULONG_PTR trace_page_start, trace_page_end;
+
+#ifdef __x86_64__
+extern ULONG_PTR syscall_caller_address(void);
+#else
+static inline ULONG_PTR syscall_caller_address(void) { return 0; }
+#endif
+
+static void trace_line( const char *fmt, ... ) __attribute__((format(printf,1,2)));
+static void trace_line( const char *fmt, ... )
+{
+    char buf[256];
+    va_list args;
+    int len;
+
+    va_start( args, fmt );
+    len = vsnprintf( buf, sizeof(buf), fmt, args );
+    va_end( args );
+    if (len > 0) write( 2, buf, len < (int)sizeof(buf) ? len : (int)sizeof(buf) - 1 );
+}
+
+static ULONG trace_tid(void)
+{
+    return trace_teb_ready ? HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) : 0;
+}
+
+static void rosetta_switches_init(void)
+{
+    const char *s;
+    char *end;
+    ULONG_PTR start, stop;
+
+    if (rosetta_switches_state) return;
+    if ((s = getenv( "WINE_ROSETTA_FLUSH_TOGGLE" ))) rosetta_flush_toggle = atoi( s ) > 0;
+    if ((s = getenv( "WINE_ROSETTA_PROTECT_TOGGLE" ))) rosetta_protect_toggle = atoi( s ) > 0;
+    if ((s = getenv( "WINE_TRACE_PAGE" )))
+    {
+        start = strtoull( s, &end, 16 );
+        if (*end == '-' && (stop = strtoull( end + 1, &end, 16 )) > start && !*end)
+        {
+            trace_page_start = start;
+            trace_page_end = stop;
+            trace_page_on = 1;
+        }
+    }
+    __sync_synchronize();
+    rosetta_switches_state = 1;
+}
+
+/* One line per process, printed on the first traced call once the TEB can be read for the process id. */
+static void trace_announce(void)
+{
+    static volatile int announced;
+
+    if (announced || !trace_teb_ready) return;
+    announced = 1;
+    trace_line( "wine-trace: window=%lx-%lx pid=%lx\n", (unsigned long)trace_page_start,
+                (unsigned long)trace_page_end, (unsigned long)HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess ) );
+}
+
+static inline void rosetta_switches(void)
+{
+    if (__builtin_expect( !rosetta_switches_state, 0 )) rosetta_switches_init();
+    if (__builtin_expect( trace_page_on, 0 )) trace_announce();
+}
+
+static BOOL trace_page_hit( const void *addr, SIZE_T size )
+{
+    ULONG_PTR a = (ULONG_PTR)addr, e = a + (size ? size : 1);
+
+    if (!trace_page_on) return FALSE;
+    return a < trace_page_end && e > trace_page_start;
+}
+
+static unsigned int trace_hash64( const void *addr, SIZE_T size )
+{
+    const BYTE *p = addr;
+    unsigned int hash = 2166136261u;
+    SIZE_T i, n = size < 64 ? size : 64;
+
+    if (!n || !virtual_check_buffer_for_read( p, n )) return 0;
+    for (i = 0; i < n; i++) hash = (hash ^ p[i]) * 16777619u;
+    return hash;
+}
+
+static void trace_op( const char *op, const void *addr, SIZE_T size, ULONG prot, ULONG old, unsigned int status,
+                      BOOL hash )
+{
+    if (!trace_page_hit( addr, size )) return;
+    trace_line( "wine-trace: op=%s tid=%x addr=%lx size=%lx prot=%x old=%x status=%x ret=%lx", op,
+                (unsigned)trace_tid(), (unsigned long)addr, (unsigned long)size, prot, old, status,
+                (unsigned long)syscall_caller_address() );
+    if (hash && !status && size) trace_line( " fnv=%08x", (unsigned)trace_hash64( addr, size ) );
+    trace_line( "\n" );
+}
+
+#ifdef __APPLE__
+/* Round-trip every committed executable region of [addr, addr+size) of the current process through a
+ * non-executable protection, using each region's own current protection and honouring the results. */
+static void rosetta_toggle_range( void *addr, SIZE_T size )
+{
+    char *p = ROUND_ADDR( addr, page_mask ), *end = (char *)ROUND_ADDR( (char *)addr + size + page_mask, page_mask );
+
+    if (!is_apple_silicon()) return;
+    while (p < end)
+    {
+        MEMORY_BASIC_INFORMATION info;
+        SIZE_T ret;
+        char *rstart, *rend;
+
+        if (NtQueryVirtualMemory( NtCurrentProcess(), p, MemoryBasicInformation, &info, sizeof(info), &ret )) break;
+        rstart = p;
+        rend = (char *)info.BaseAddress + info.RegionSize;
+        if (rend > end) rend = end;
+        if (info.State == MEM_COMMIT && (info.Protect & ROSETTA_EXEC_BITS) && !(info.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
+        {
+            void *base = rstart;
+            SIZE_T len = rend - rstart;
+            ULONG orig = info.Protect, junk;
+            /* the same access without the execute bit: X -> NOACCESS, XR -> R, XRW -> RW, XWC -> WC */
+            ULONG noexec = ((orig & 0xff) >> 4) | (orig & ~0xffu);
+            unsigned int st1, st2 = 0;
+
+            st1 = real_NtProtectVirtualMemory( NtCurrentProcess(), &base, &len, noexec, &junk );
+            if (!st1)
+            {
+                base = rstart;
+                len = rend - rstart;
+                if ((st2 = real_NtProtectVirtualMemory( NtCurrentProcess(), &base, &len, orig, &junk )))
+                    ERR( "could not restore protection %x on %p-%p\n", orig, rstart, rend );
+            }
+            trace_op( "toggle", rstart, rend - rstart, orig, noexec, st1 ? st1 : st2, FALSE );
+        }
+        if (rend <= p) break;
+        p = rend;
+    }
+}
+#endif
+
 /***********************************************************************
  *             NtWriteVirtualMemory   (NTDLL.@)
  *             ZwWriteVirtualMemory   (NTDLL.@)
@@ -6918,6 +7069,8 @@ NTSTATUS WINAPI NtWriteVirtualMemory( HANDLE process, void *addr, const void *bu
         status = STATUS_PARTIAL_COPY;
         size = 0;
     }
+    rosetta_switches();
+    if (trace_page_on && process == NtCurrentProcess()) trace_op( "write", addr, size, 0, 0, status, TRUE );
     if (bytes_written) *bytes_written = size;
     return status;
 }
@@ -7064,7 +7217,14 @@ NTSTATUS WINAPI NtSetInformationVirtualMemory( HANDLE process,
 NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T size )
 {
 #if defined(__x86_64__) || defined(__i386__)
-    /* no-op */
+    rosetta_switches();
+    if (handle == GetCurrentProcess() || handle == NULL)
+    {
+#ifdef __APPLE__
+        if (rosetta_flush_toggle && size) rosetta_toggle_range( (void *)addr, size );
+#endif
+        trace_op( "flush", addr, size, 0, 0, 0, TRUE );
+    }
 #elif defined(HAVE___CLEAR_CACHE)
     if (handle == GetCurrentProcess())
     {
@@ -7341,3 +7501,100 @@ NTSTATUS WINAPI NtWow64IsProcessorFeaturePresent( UINT feature )
 }
 
 #endif  /* _WIN64 */
+
+
+/* Patch 0007: thin entry points over the real implementations, for the experiment switches and tracing. */
+
+NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits, SIZE_T *size_ptr,
+                                         ULONG type, ULONG protect )
+{
+    NTSTATUS status = real_NtAllocateVirtualMemory( process, ret, zero_bits, size_ptr, type, protect );
+
+    rosetta_switches();
+    if (trace_page_on && process == NtCurrentProcess() && ret && size_ptr)
+        trace_op( "alloc", *ret, *size_ptr, protect, type, status, FALSE );
+    return status;
+}
+
+NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *size_ptr, ULONG type,
+                                           ULONG protect, MEM_EXTENDED_PARAMETER *parameters, ULONG count )
+{
+    NTSTATUS status = real_NtAllocateVirtualMemoryEx( process, ret, size_ptr, type, protect, parameters, count );
+
+    rosetta_switches();
+    if (trace_page_on && process == NtCurrentProcess() && ret && size_ptr)
+        trace_op( "alloc", *ret, *size_ptr, protect, type, status, FALSE );
+    return status;
+}
+
+NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr, ULONG type )
+{
+    void *addr = addr_ptr ? *addr_ptr : NULL;
+    SIZE_T size = size_ptr ? *size_ptr : 0;
+    NTSTATUS status = real_NtFreeVirtualMemory( process, addr_ptr, size_ptr, type );
+
+    rosetta_switches();
+    if (trace_page_on && process == NtCurrentProcess()) trace_op( "free", addr, size, 0, type, status, FALSE );
+    return status;
+}
+
+NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr, ULONG new_prot,
+                                        ULONG *old_prot )
+{
+    void *addr = addr_ptr ? *addr_ptr : NULL;
+    SIZE_T size = size_ptr ? *size_ptr : 0;
+    NTSTATUS status = real_NtProtectVirtualMemory( process, addr_ptr, size_ptr, new_prot, old_prot );
+
+    rosetta_switches();
+#ifdef __APPLE__
+    if (rosetta_protect_toggle && !status && process == NtCurrentProcess() && (new_prot & ROSETTA_EXEC_BITS))
+        rosetta_toggle_range( addr, size );
+#endif
+    if (trace_page_on && process == NtCurrentProcess())
+        trace_op( "protect", addr, size, new_prot, old_prot && !status ? *old_prot : 0, status, FALSE );
+    return status;
+}
+
+NTSTATUS WINAPI NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_ptr, ULONG_PTR zero_bits,
+                                    SIZE_T commit_size, const LARGE_INTEGER *offset_ptr, SIZE_T *size_ptr,
+                                    SECTION_INHERIT inherit, ULONG alloc_type, ULONG protect )
+{
+    NTSTATUS status = real_NtMapViewOfSection( handle, process, addr_ptr, zero_bits, commit_size, offset_ptr,
+                                               size_ptr, inherit, alloc_type, protect );
+
+    rosetta_switches();
+    if (trace_page_on && process == NtCurrentProcess() && addr_ptr && size_ptr)
+        trace_op( "map", *addr_ptr, *size_ptr, protect, alloc_type, status, FALSE );
+    return status;
+}
+
+NTSTATUS WINAPI NtMapViewOfSectionEx( HANDLE handle, HANDLE process, PVOID *addr_ptr, const LARGE_INTEGER *offset_ptr,
+                                      SIZE_T *size_ptr, ULONG alloc_type, ULONG protect,
+                                      MEM_EXTENDED_PARAMETER *parameters, ULONG count )
+{
+    NTSTATUS status = real_NtMapViewOfSectionEx( handle, process, addr_ptr, offset_ptr, size_ptr, alloc_type,
+                                                 protect, parameters, count );
+
+    rosetta_switches();
+    if (trace_page_on && process == NtCurrentProcess() && addr_ptr && size_ptr)
+        trace_op( "map", *addr_ptr, *size_ptr, protect, alloc_type, status, FALSE );
+    return status;
+}
+
+NTSTATUS WINAPI NtUnmapViewOfSection( HANDLE process, PVOID addr )
+{
+    NTSTATUS status = real_NtUnmapViewOfSection( process, addr );
+
+    rosetta_switches();
+    if (trace_page_on && process == NtCurrentProcess()) trace_op( "unmap", addr, 1, 0, 0, status, FALSE );
+    return status;
+}
+
+NTSTATUS WINAPI NtUnmapViewOfSectionEx( HANDLE process, PVOID addr, ULONG flags )
+{
+    NTSTATUS status = real_NtUnmapViewOfSectionEx( process, addr, flags );
+
+    rosetta_switches();
+    if (trace_page_on && process == NtCurrentProcess()) trace_op( "unmap", addr, 1, 0, flags, status, FALSE );
+    return status;
+}
