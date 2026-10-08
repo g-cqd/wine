@@ -151,6 +151,7 @@ struct IDirectSoundBufferImpl
     float                       firgain;
     LONG64                      freqAdjustNum,freqAdjustDen;
     LONG64                      freqAccNum;
+    struct fir_phases           *fir_phases;
     /* used for mixing */
     DWORD                       sec_mixpos;
     /* Holds a copy of the next 'writelead' bytes, to be used for mixing. This makes it
@@ -233,6 +234,7 @@ void DSOUND_CheckEvent(const IDirectSoundBufferImpl *dsb, DWORD playpos, int len
 void DSOUND_RecalcVolPan(PDSVOLUMEPAN volpan);
 void DSOUND_AmpFactorToVolPan(PDSVOLUMEPAN volpan);
 void DSOUND_RecalcFormat(IDirectSoundBufferImpl *dsb);
+void DSOUND_FreeFirPhases(IDirectSoundBufferImpl *dsb);
 DWORD DSOUND_secpos_to_bufpos(const IDirectSoundBufferImpl *dsb, DWORD secpos, DWORD secmixpos, float *overshot);
 
 DWORD CALLBACK DSOUND_mixthread(void *ptr);
