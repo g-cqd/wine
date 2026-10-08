@@ -526,6 +526,26 @@ C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct amd64_thread_data, tf_
 C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct amd64_thread_data, tf_guest_flags ) == 0x344 );
 C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct amd64_thread_data, tf_steps ) == 0x350 );
 
+/* The return address of the Windows caller of the current syscall (the word at the saved rsp), 0 when unreadable.
+ * Used by the optional wine-trace lines in virtual.c. */
+ULONG_PTR syscall_caller_address(void)
+{
+    struct syscall_frame *frame = get_syscall_frame();
+    ULONG_PTR value = 0;
+
+    if (!frame || !frame->rsp || (frame->rsp & 7)) return 0;
+    __TRY
+    {
+        value = *(volatile ULONG_PTR *)frame->rsp;
+    }
+    __EXCEPT
+    {
+        value = 0;
+    }
+    __ENDTRY
+    return value;
+}
+
 static inline struct amd64_thread_data *amd64_thread_data(void)
 {
     return (struct amd64_thread_data *)ntdll_get_thread_data()->cpu_data;
