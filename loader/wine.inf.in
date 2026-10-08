@@ -395,7 +395,7 @@ HKLM,%CurrentVersion%,"ProgramFilesDir (Arm)",,"C:\Program Files (Arm)"
 HKLM,%CurrentVersion%,"CommonFilesDir (Arm)",,"C:\Program Files (Arm)\Common Files"
 HKLM,Software\Microsoft\Wow64\amd64,,2,"xtajit64.dll"
 HKLM,Software\Microsoft\Wow64\arm,,2,"wowarmhw.dll"
-HKLM,Software\Microsoft\Wow64\x86,,2,"xtajit.dll"
+HKLM,Software\Microsoft\Wow64\x86,,2,"r3wow64.dll"
 
 [CurrentVersionWow64.ntx86]
 HKLM,%CurrentVersion%,"ProgramFilesDir (x86)",,"%16422%"
