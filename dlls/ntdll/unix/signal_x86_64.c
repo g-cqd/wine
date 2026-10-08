@@ -2797,6 +2797,35 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     EXCEPTION_RECORD rec = { 0 };
     struct xcontext context;
 
+#ifdef __APPLE__
+    /* WINE_RWX_WX_EMULATION: see virtual.c */
+    {
+        struct ntdll_thread_data *wx_data = ntdll_get_thread_data();
+        if (wx_data->wx_page)
+        {
+            /* another fault while a page is open for one store: close it, keep our trap flag out of the guest */
+            virtual_wx_step();
+            if (wx_data->wx_tf) EFL_sig(ucontext) &= ~0x100;
+            wx_data->wx_tf = FALSE;
+        }
+        if (TRAP_sig(ucontext) == TRAP_x86_PAGEFLT)
+        {
+            BOOL step;
+            if (virtual_wx_fault( siginfo->si_addr, is_inside_syscall( RSP_sig(ucontext) ),
+                                  tf_thread_data() && (amd64_thread_data()->tf_state & TF_CARRIER), &step ))
+            {
+                if (step)
+                {
+                    wx_data->wx_tf = !(EFL_sig(ucontext) & 0x100);
+                    EFL_sig(ucontext) |= 0x100;
+                }
+                leave_handler( ucontext );
+                return;
+            }
+        }
+    }
+#endif
+
     if (tf_thread_data() && (amd64_thread_data()->tf_state & TF_CARRIER) &&
         !is_inside_syscall( RSP_sig(ucontext) )) TF_STOP("native-fault-unsupported");
     rec.ExceptionAddress = (void *)RIP_sig(ucontext);
@@ -2895,6 +2924,23 @@ static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     EXCEPTION_RECORD rec = { 0 };
     struct xcontext context;
 
+#ifdef __APPLE__
+    if (TRAP_sig(ucontext) == TRAP_x86_TRCTRAP && ntdll_get_thread_data()->wx_page)
+    {
+        struct ntdll_thread_data *wx_data = ntdll_get_thread_data();
+        BOOL ours = wx_data->wx_tf;
+
+        wx_data->wx_tf = FALSE;
+        virtual_wx_step();
+        if (ours)
+        {
+            EFL_sig(ucontext) &= ~0x100;
+            leave_handler( ucontext );
+            return;
+        }
+        /* the trap flag was already set by the guest or the trap-flag emulation: that step is theirs too */
+    }
+#endif
     if (handle_syscall_trap( ucontext, siginfo )) return;
     if (tf_thread_data() && (amd64_thread_data()->tf_state & TF_CARRIER) &&
         TRAP_sig(ucontext) != TRAP_x86_TRCTRAP) TF_STOP("non-step-trap-unsupported");
