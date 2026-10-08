@@ -40,3 +40,18 @@ Reported on the Wine 11.18 build of this series, 10 checks total:
 
 The two failures without the mode are the delivery checks: the breakpoint is
 never raised, so `hits` stays 0 and `DR6` never reports breakpoint 0.
+
+## Crash-context block
+
+`crash-context.c` and `crash-context-check.sh` cover the `wine-crash:` lines that
+`UnhandledExceptionFilter` (dlls/kernelbase/debug.c) writes to Wine's stderr just before it starts the
+debugger: registers, flags, MXCSR, segments, the 16 bytes at the instruction pointer, 8 stack slots, the page
+state/protection/module of the pc and of the faulting address, and the trap-flag emulation counters kept in the
+TEB (`tf state`, `guest_flags`, `steps`; 0 unless `WINE_TF_EMULATION=1` has stepped that thread). Useful when
+winedbg only reports `Couldn't get first exception`. Build and run:
+
+    x86_64-w64-mingw32-gcc -O1 -o crash-context.exe crash-context.c
+    WINEPREFIX=... ./crash-context-check.sh /path/to/wine crash-context.exe
+
+Expect `ok   crash-context block complete`. winedbg is still started afterwards and may wait for input when
+stdin is not a terminal; kill it, the child's exit status stays `c0000005`.
