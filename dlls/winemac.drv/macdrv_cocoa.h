@@ -109,6 +109,18 @@ enum {
     GL_SURFACE_BEHIND,
 };
 
+/* How a full-screen Windows program is presented (FullscreenMode). */
+enum {
+    /* Display mode changes are emulated, and a borderless window covering
+       its screen enters a native macOS full-screen space. */
+    FULLSCREEN_MODE_NATIVE,
+    /* Display mode changes are emulated; a covering window stays a borderless
+       window over the desktop, with the Dock and menu bar hidden. */
+    FULLSCREEN_MODE_BORDERLESS,
+    /* Display mode changes switch the hardware mode and capture the displays. */
+    FULLSCREEN_MODE_LEGACY,
+};
+
 enum {
     MACDRV_HOTKEY_SUCCESS,
     MACDRV_HOTKEY_ALREADY_REGISTERED,
@@ -131,6 +143,7 @@ struct macdrv_query;
 extern bool macdrv_err_on;
 extern int topmost_float_inactive;
 extern bool capture_displays_for_fullscreen;
+extern int fullscreen_mode;
 /* CrossOver Hack 10912: Mac Edit menu */
 extern int mac_edit_menu;
 extern bool left_option_is_alt;
@@ -545,6 +558,7 @@ extern void macdrv_set_window_shape(macdrv_window w, const CGRect *rects, int co
 extern void macdrv_set_window_alpha(macdrv_window w, CGFloat alpha);
 extern void macdrv_window_use_per_pixel_alpha(macdrv_window w, bool use_per_pixel_alpha);
 extern void macdrv_set_window_mask(macdrv_window w, CGRect rect);
+extern void macdrv_set_window_native_fullscreen(macdrv_window w, int enable);
 extern void macdrv_give_cocoa_window_focus(macdrv_window w, bool activate);
 extern void macdrv_set_window_min_max_sizes(macdrv_window w, CGSize min_size, CGSize max_size);
 extern macdrv_view macdrv_create_view(CGRect rect);

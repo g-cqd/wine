@@ -793,6 +793,21 @@ LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWN
 
     TRACE("%p %s %p 0x%08x %p\n", displays, debugstr_w(primary_name), hwnd, flags, lpvoid);
 
+    /* With emulated modes the only host mode reported is the current one, and
+       win32u keeps the mode a program asks for as a virtual mode, scaling its
+       windows and input to the physical one.  Never switch the hardware mode or
+       capture the displays: on a Retina display a "same size" request at
+       another refresh rate selects a low-resolution 1:1 mode, which flips the
+       Retina mode of every window. */
+    if (fullscreen_mode != FULLSCREEN_MODE_LEGACY)
+    {
+        for (mode = displays; mode->dmSize; mode = NEXT_DEVMODEW(mode))
+            TRACE("emulating %s: %ux%u %u bpp @%u Hz\n", debugstr_w(mode->dmDeviceName),
+                  (UINT)mode->dmPelsWidth, (UINT)mode->dmPelsHeight, (UINT)mode->dmBitsPerPel,
+                  (UINT)mode->dmDisplayFrequency);
+        return DISP_CHANGE_SUCCESSFUL;
+    }
+
     init_original_display_mode();
 
     /* TODO: support displays other than the main one */
@@ -1142,9 +1157,19 @@ UINT macdrv_UpdateDisplayDevices(const struct gdi_device_manager *device_manager
                     display_get_current_mode(monitor, &current_mode);
             }
 
-            if (!(modes = display_get_modes(adapter->id, &mode_count))) break;
-            device_manager->add_modes( &current_mode, mode_count, modes, param );
-            free(modes);
+            if (fullscreen_mode != FULLSCREEN_MODE_LEGACY)
+            {
+                /* A single host mode makes win32u emulate every other mode:
+                   it lists the native mode with the standard sizes below it
+                   and reports whichever the program sets as the current one. */
+                device_manager->add_modes( &current_mode, 1, &current_mode, param );
+            }
+            else
+            {
+                if (!(modes = display_get_modes(adapter->id, &mode_count))) break;
+                device_manager->add_modes( &current_mode, mode_count, modes, param );
+                free(modes);
+            }
             macdrv_free_monitors(monitors, monitor_count);
         }
 

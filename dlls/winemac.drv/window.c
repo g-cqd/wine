@@ -1680,6 +1680,31 @@ BOOL macdrv_GetWindowStyleMasks(HWND hwnd, UINT style, UINT ex_style, UINT *styl
 
 
 /***********************************************************************
+ *              wants_native_fullscreen
+ *
+ * Whether a window should be presented in a native macOS full-screen space:
+ * an unowned, unminimized top-level window without a title bar that covers
+ * its monitor, as a game does in exclusive full-screen mode.  Visibility is
+ * left to the Cocoa side, which enters the space once the window is ordered
+ * in, so that hiding and showing the window doesn't flip the request.
+ */
+static BOOL wants_native_fullscreen(struct macdrv_win_data *data, BOOL fullscreen, DWORD style)
+{
+    DWORD ex_style;
+
+    if (fullscreen_mode != FULLSCREEN_MODE_NATIVE || !fullscreen) return FALSE;
+    if (style & (WS_MINIMIZE | WS_CHILD)) return FALSE;
+    if (data->hwnd == NtUserGetDesktopWindow()) return FALSE;
+    if (NtUserGetWindowRelative(data->hwnd, GW_OWNER)) return FALSE;
+
+    ex_style = NtUserGetWindowLongW(data->hwnd, GWL_EXSTYLE);
+    if (ex_style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED)) return FALSE;
+
+    return !get_cocoa_window_features(data, style, ex_style).title_bar;
+}
+
+
+/***********************************************************************
  *              WindowPosChanged   (MACDRV.@)
  */
 void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
@@ -1736,9 +1761,29 @@ void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT
 
     if (fullscreen || fullscreen != data->fullscreen)
     {
-        CGRect rect = (fullscreen && !EqualRect(&data->rects.window, &data->rects.visible)) ? cgrect_from_rect(data->rects.window) : CGRectZero;
+        CGRect rect = CGRectZero;
+
+        /* The mask is in the coordinates of the Cocoa content view, which
+           starts at the visible rect. */
+        if (fullscreen && !EqualRect(&data->rects.window, &data->rects.visible))
+        {
+            RECT window = data->rects.window;
+            OffsetRect(&window, -data->rects.visible.left, -data->rects.visible.top);
+            rect = cgrect_from_rect(window);
+        }
         macdrv_set_window_mask(data->cocoa_window, rect);
         data->fullscreen = fullscreen;
+    }
+
+    if (data->cocoa_window)
+    {
+        BOOL native_fullscreen = wants_native_fullscreen(data, fullscreen, new_style);
+        if (native_fullscreen != data->native_fullscreen)
+        {
+            TRACE("win %p/%p native fullscreen %d\n", hwnd, data->cocoa_window, native_fullscreen);
+            data->native_fullscreen = native_fullscreen;
+            macdrv_set_window_native_fullscreen(data->cocoa_window, native_fullscreen);
+        }
     }
 
 done:

@@ -674,6 +674,20 @@ static NSString* WineLocalizedString(unsigned int stringID)
         rect->origin.y = NSMaxY([[NSScreen screens][0] frame]) - NSMaxY(*rect);
     }
 
+    /* The window, if any, whose content is scaled in a native full-screen
+       space on the active space: cursor positions Win32 sets or reads are in
+       its coordinates. */
+    - (WineWindow*) scaledFullScreenWindow
+    {
+        for (NSWindow* window in [NSApp windows])
+        {
+            if ([window isKindOfClass:[WineWindow class]] && [(WineWindow*)window isScaledInFullScreen] &&
+                [window isVisible] && [window isOnActiveSpace])
+                return (WineWindow*)window;
+        }
+        return nil;
+    }
+
     - (WineWindow*) frontWineWindow
     {
         NSNumber* windowNumber;
@@ -1637,6 +1651,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
             {
                 if (self.clippingCursor)
                     [clipCursorHandler clipCursorLocation:&point];
+                point = [targetWindow winePointFromScreenPoint:point];
                 point = cgpoint_win_from_mac(point);
 
                 event = macdrv_create_event(MOUSE_MOVED_ABSOLUTE, targetWindow);
@@ -1648,7 +1663,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
             }
             else
             {
-                double scale = retina_on ? 2 : 1;
+                double scale = (retina_on ? 2 : 1) * [targetWindow wineUnitsPerScreenUnit];
 
                 /* Add event delta to accumulated delta error */
                 /* deltaY is already flipped */
@@ -1782,6 +1797,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
             {
                 macdrv_event* event;
 
+                pt = [window winePointFromScreenPoint:pt];
                 pt = cgpoint_win_from_mac(pt);
 
                 event = macdrv_create_event(MOUSE_BUTTON, window);
@@ -1865,6 +1881,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
                 double x, y;
                 BOOL continuous = FALSE;
 
+                pt = [window winePointFromScreenPoint:pt];
                 pt = cgpoint_win_from_mac(pt);
 
                 event = macdrv_create_event(MOUSE_SCROLL, window);
@@ -2962,9 +2979,16 @@ void macdrv_set_cursor(CFStringRef name, CFArrayRef frames, CGFloat scale)
 int macdrv_get_cursor_position(CGPoint *pos)
 {
     OnMainThread(^{
+        WineApplicationController* controller = [WineApplicationController sharedController];
+        WineWindow* window = [controller scaledFullScreenWindow];
         NSPoint location = [NSEvent mouseLocation];
-        location = [[WineApplicationController sharedController] flippedMouseLocation:location];
-        *pos = cgpoint_win_from_mac(NSPointToCGPoint(location));
+        CGPoint point;
+
+        location = [controller flippedMouseLocation:location];
+        point = NSPointToCGPoint(location);
+        if (window)
+            point = [window winePointFromScreenPoint:point];
+        *pos = cgpoint_win_from_mac(point);
     });
 
     return TRUE;
@@ -2981,7 +3005,13 @@ int macdrv_set_cursor_position(CGPoint pos)
     __block int ret;
 
     OnMainThread(^{
-        ret = [[WineApplicationController sharedController] setCursorPosition:cgpoint_mac_from_win(pos)];
+        WineApplicationController* controller = [WineApplicationController sharedController];
+        WineWindow* window = [controller scaledFullScreenWindow];
+        CGPoint point = cgpoint_mac_from_win(pos);
+
+        if (window)
+            point = [window screenPointFromWinePoint:point];
+        ret = [controller setCursorPosition:point];
     });
 
     return ret;
@@ -3004,7 +3034,19 @@ int macdrv_clip_cursor(CGRect r)
         CGRect rect = r;
 
         if (!CGRectIsInfinite(rect))
+        {
+            WineWindow* window = [controller scaledFullScreenWindow];
+
             rect = cgrect_mac_from_win(rect);
+
+            /* Clip to where the content shows on screen. */
+            if (window)
+            {
+                CGPoint min = [window screenPointFromWinePoint:rect.origin];
+                CGPoint max = [window screenPointFromWinePoint:CGPointMake(CGRectGetMaxX(rect), CGRectGetMaxY(rect))];
+                rect = CGRectMake(min.x, min.y, max.x - min.x, max.y - min.y);
+            }
+        }
 
         if (!CGRectIsInfinite(rect))
         {
