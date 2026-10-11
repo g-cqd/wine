@@ -84,6 +84,17 @@
     BOOL fakingClose;
 
     CAShapeLayer* contentViewMaskLayer;
+
+    /* Native full-screen space for a window covering its monitor
+       (FullscreenMode=native).  While the window is in that space, its Cocoa
+       frame is the one AppKit chose, which on a display with a camera housing
+       is shorter than the screen; Windows keeps the frame it set, held in
+       fullScreenWineFrame, and the content is scaled to fit. */
+    BOOL wantsNativeFullScreen;       /* Win32 asked for the space */
+    BOOL inAutoFullScreen;            /* we entered the space for Win32 */
+    BOOL suppressAutoFullScreen;      /* the user left it; don't re-enter */
+    NSRect fullScreenWineFrame;       /* frame Win32 set, Cocoa coordinates */
+    NSRect fullScreenSourceRect;      /* mask rect in content coordinates, or empty */
 }
 
 @property (retain, readonly, nonatomic) WineEventQueue* queue;
@@ -115,5 +126,13 @@
     - (void) updateForCursorClipping;
 
     - (void) setRetinaMode:(BOOL)mode;
+
+    /* Mapping of global points (Quartz coordinates: top-left origin, in
+       points) between where the content shows on screen and where Win32
+       placed it, while the window is scaled in a native full-screen space. */
+    - (BOOL) isScaledInFullScreen;
+    - (CGPoint) winePointFromScreenPoint:(CGPoint)point;
+    - (CGPoint) screenPointFromWinePoint:(CGPoint)point;
+    - (CGFloat) wineUnitsPerScreenUnit;
 
 @end

@@ -139,6 +139,7 @@ enum {
     - (NSPoint) flippedMouseLocation:(NSPoint)point;
 
     - (WineWindow*) frontWineWindow;
+    - (WineWindow*) scaledFullScreenWindow;
     - (void) adjustWindowLevels;
     - (void) prepareToMiniaturize;
     - (void) updateFullscreenWindows;

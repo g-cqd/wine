@@ -44,6 +44,7 @@ C_ASSERT(NUM_EVENT_TYPES <= sizeof(macdrv_event_mask) * 8);
 
 int topmost_float_inactive = TOPMOST_FLOAT_INACTIVE_NONFULLSCREEN;
 bool capture_displays_for_fullscreen = false;
+int fullscreen_mode = FULLSCREEN_MODE_NATIVE;
 BOOL allow_vsync = TRUE;
 BOOL allow_set_gamma = TRUE;
 /* CrossOver Hack 10912: Mac Edit menu */
@@ -395,6 +396,24 @@ static void setup_options(void)
         retina_enabled = IS_OPTION_TRUE(buffer[0]);
 
     retina_on = retina_enabled;
+
+    /* Not per application either: the display modes every process of the
+       prefix sees come from this setting. */
+    if (!get_config_key(hkey, NULL, "FullscreenMode", buffer, sizeof(buffer)))
+    {
+        static const WCHAR legacyW[] = {'l','e','g','a','c','y',0};
+        static const WCHAR borderlessW[] = {'b','o','r','d','e','r','l','e','s','s',0};
+        if (!wcsicmp(buffer, legacyW))
+            fullscreen_mode = FULLSCREEN_MODE_LEGACY;
+        else if (!wcsicmp(buffer, borderlessW))
+            fullscreen_mode = FULLSCREEN_MODE_BORDERLESS;
+        else
+            fullscreen_mode = FULLSCREEN_MODE_NATIVE;
+    }
+
+    /* Emulated display modes never capture the displays. */
+    if (fullscreen_mode != FULLSCREEN_MODE_LEGACY)
+        capture_displays_for_fullscreen = false;
 
     if (appkey) NtClose(appkey);
     if (hkey) NtClose(hkey);
