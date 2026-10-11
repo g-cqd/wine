@@ -41,6 +41,7 @@
 #include <unistd.h>
 
 #ifdef __APPLE__
+#include <pwd.h>
 #include <CoreText/CoreText.h>
 #endif /* __APPLE__ */
 
@@ -1383,6 +1384,226 @@ done:
 
 #elif defined(__APPLE__)
 
+/* The macOS font files to load are those of the CoreText collection of available fonts with
+ * duplicates removed. Removing the duplicates costs about 1.5 s (0.8 s of CPU) per process
+ * under Rosetta, and CoreText does not simply keep the first of a set of duplicates, so the
+ * list cannot be rebuilt cheaply. Instead the first process of a wineserver session stores
+ * the list, in load order, in a volatile registry key, with the identity and modification time
+ * of the font folders; later processes replay it while those folders are unchanged.
+ * WINE_MAC_FONT_CACHE=0 disables the cache. */
+
+struct mac_font_list
+{
+    char **paths;
+    unsigned int count, size;
+};
+
+static void mac_font_list_add( struct mac_font_list *list, const char *path )
+{
+    char *copy;
+
+    if (list->count == list->size)
+    {
+        unsigned int size = list->size ? list->size * 2 : 512;
+        char **paths = realloc( list->paths, size * sizeof(*paths) );
+        if (!paths) return;
+        list->paths = paths;
+        list->size = size;
+    }
+    if ((copy = strdup( path ))) list->paths[list->count++] = copy;
+}
+
+static void mac_font_list_free( struct mac_font_list *list )
+{
+    unsigned int i;
+    for (i = 0; i < list->count; i++) free( list->paths[i] );
+    free( list->paths );
+}
+
+#define MAC_FONT_CACHE_MAGIC   0x4346574d /* "MWFC" */
+#define MAC_FONT_CACHE_VERSION 1
+
+struct mac_font_cache_header
+{
+    UINT magic;
+    UINT version;
+    UINT dir_count;
+    UINT file_count;
+    UINT strings_size; /* dir paths, then file paths, each null-terminated */
+};
+
+struct mac_font_dir_stamp
+{
+    ULONGLONG dev;
+    ULONGLONG ino;
+    LONGLONG mtime_sec;
+    LONGLONG mtime_nsec;
+};
+
+static void get_mac_font_dir_stamp( const char *dir, struct mac_font_dir_stamp *stamp )
+{
+    struct stat st;
+
+    memset( stamp, 0, sizeof(*stamp) );
+    if (stat( dir, &st )) return;
+    stamp->dev = st.st_dev;
+    stamp->ino = st.st_ino;
+    stamp->mtime_sec = st.st_mtimespec.tv_sec;
+    stamp->mtime_nsec = st.st_mtimespec.tv_nsec;
+}
+
+static BOOL mac_font_cache_enabled(void)
+{
+    const char *env = getenv( "WINE_MAC_FONT_CACHE" );
+    return !env || strcmp( env, "0" );
+}
+
+static HKEY open_mac_font_cache_key(void)
+{
+    HKEY fonts_key, key;
+
+    /* @@ Wine registry key: HKCU\Software\Wine\Fonts\MacFontCache (volatile) */
+    if (!(fonts_key = reg_open_hkcu_key( "Software\\Wine\\Fonts" ))) return 0;
+    key = reg_create_ascii_key( fonts_key, "MacFontCache", REG_OPTION_VOLATILE, NULL );
+    NtClose( fonts_key );
+    return key;
+}
+
+static const WCHAR mac_font_cache_valueW[] = {'F','i','l','e','s',0};
+
+static void add_mac_font_dir( struct mac_font_list *dirs, const char *dir )
+{
+    unsigned int i;
+
+    for (i = 0; i < dirs->count; i++) if (!strcmp( dirs->paths[i], dir )) return;
+    mac_font_list_add( dirs, dir );
+}
+
+/* Directories whose content decides the font list: the standard font folders, so that new
+ * fonts are noticed, and the folder of every listed file. */
+static void get_mac_font_dirs( const struct mac_font_list *files, struct mac_font_list *dirs )
+{
+    static const char * const std_dirs[] =
+    {
+        "/System/Library/Fonts", "/System/Library/Fonts/Supplemental", "/Library/Fonts",
+        "/Network/Library/Fonts",
+    };
+    const struct passwd *pwd = getpwuid( getuid() );
+    char buffer[PATH_MAX];
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(std_dirs); i++) add_mac_font_dir( dirs, std_dirs[i] );
+    if (pwd && pwd->pw_dir && snprintf( buffer, sizeof(buffer), "%s/Library/Fonts", pwd->pw_dir ) < sizeof(buffer))
+        add_mac_font_dir( dirs, buffer );
+
+    for (i = 0; files && i < files->count; i++)
+    {
+        const char *slash = strrchr( files->paths[i], '/' );
+        size_t len = slash ? slash - files->paths[i] : 0;
+
+        if (!len || len >= sizeof(buffer)) continue;
+        memcpy( buffer, files->paths[i], len );
+        buffer[len] = 0;
+        add_mac_font_dir( dirs, buffer );
+    }
+}
+
+static BOOL read_mac_font_cache( struct mac_font_list *files )
+{
+    KEY_VALUE_PARTIAL_INFORMATION *info = NULL;
+    const struct mac_font_cache_header *header;
+    const struct mac_font_dir_stamp *stamps;
+    struct mac_font_dir_stamp stamp;
+    UNICODE_STRING name;
+    const char *str, *end;
+    ULONG size = 256 * 1024;
+    unsigned int i;
+    NTSTATUS status;
+    BOOL ret = FALSE;
+    HKEY key;
+
+    if (!(key = open_mac_font_cache_key())) return FALSE;
+    name.Buffer = (WCHAR *)mac_font_cache_valueW;
+    name.Length = name.MaximumLength = sizeof(mac_font_cache_valueW) - sizeof(WCHAR);
+    for (;;)
+    {
+        free( info );
+        if (!(info = malloc( size ))) goto done;
+        status = NtQueryValueKey( key, &name, KeyValuePartialInformation, info, size, &size );
+        if (status != STATUS_BUFFER_OVERFLOW) break;
+    }
+    if (status || info->Type != REG_BINARY || info->DataLength < sizeof(*header)) goto done;
+
+    header = (const struct mac_font_cache_header *)info->Data;
+    if (header->magic != MAC_FONT_CACHE_MAGIC || header->version != MAC_FONT_CACHE_VERSION) goto done;
+    if (info->DataLength != sizeof(*header) + header->dir_count * sizeof(*stamps) + header->strings_size)
+        goto done;
+    stamps = (const struct mac_font_dir_stamp *)(header + 1);
+    str = (const char *)(stamps + header->dir_count);
+    end = str + header->strings_size;
+
+    for (i = 0; i < header->dir_count + header->file_count; i++)
+    {
+        const char *next = memchr( str, 0, end - str );
+        if (!next) goto done;
+        if (i < header->dir_count)
+        {
+            get_mac_font_dir_stamp( str, &stamp );
+            if (memcmp( &stamp, &stamps[i], sizeof(stamp) ))
+            {
+                TRACE( "font directory %s changed\n", debugstr_a(str) );
+                goto done;
+            }
+        }
+        else mac_font_list_add( files, str );
+        str = next + 1;
+    }
+    ret = files->count == header->file_count;
+
+done:
+    if (!ret)
+    {
+        mac_font_list_free( files );
+        memset( files, 0, sizeof(*files) );
+    }
+    free( info );
+    NtClose( key );
+    return ret;
+}
+
+static void write_mac_font_cache( const struct mac_font_list *files, const struct mac_font_list *dirs,
+                                  const struct mac_font_dir_stamp *stamps )
+{
+    struct mac_font_cache_header header;
+    size_t strings_size = 0, size;
+    unsigned int i;
+    char *data, *ptr;
+    HKEY key;
+
+    for (i = 0; i < dirs->count; i++) strings_size += strlen( dirs->paths[i] ) + 1;
+    for (i = 0; i < files->count; i++) strings_size += strlen( files->paths[i] ) + 1;
+    size = sizeof(header) + dirs->count * sizeof(*stamps) + strings_size;
+    if (size > 0x1000000 || !(data = malloc( size ))) return;
+
+    header.magic = MAC_FONT_CACHE_MAGIC;
+    header.version = MAC_FONT_CACHE_VERSION;
+    header.dir_count = dirs->count;
+    header.file_count = files->count;
+    header.strings_size = strings_size;
+    memcpy( data, &header, sizeof(header) );
+    memcpy( data + sizeof(header), stamps, dirs->count * sizeof(*stamps) );
+    ptr = data + sizeof(header) + dirs->count * sizeof(*stamps);
+    for (i = 0; i < dirs->count; i++) ptr = stpcpy( ptr, dirs->paths[i] ) + 1;
+    for (i = 0; i < files->count; i++) ptr = stpcpy( ptr, files->paths[i] ) + 1;
+
+    if ((key = open_mac_font_cache_key()))
+    {
+        set_reg_value( key, mac_font_cache_valueW, REG_BINARY, data, size );
+        NtClose( key );
+    }
+    free( data );
+}
+
 static void load_mac_font_callback(const void *value, void *context)
 {
     CFURLRef url = value;
@@ -1396,15 +1617,12 @@ static void load_mac_font_callback(const void *value, void *context)
     len = CFStringGetMaximumSizeOfFileSystemRepresentation(pathStr);
     path = malloc( len );
     if (path && CFStringGetFileSystemRepresentation(pathStr, path, len))
-    {
-        TRACE("font file %s\n", path);
-        AddFontToList(NULL, path, NULL, 0, ADDFONT_EXTERNAL_FONT);
-    }
+        mac_font_list_add( context, path );
     free( path );
     CFRelease(pathStr);
 }
 
-static void load_mac_fonts(void)
+static void get_mac_font_files( struct mac_font_list *files )
 {
     CFStringRef removeDupesKey;
     CFBooleanRef removeDupesValue;
@@ -1471,8 +1689,55 @@ static void load_mac_fonts(void)
 
     CFRelease(descs);
 
-    CFSetApplyFunction(urls, load_mac_font_callback, NULL);
+    CFSetApplyFunction(urls, load_mac_font_callback, files);
     CFRelease(urls);
+}
+
+static void load_mac_fonts(void)
+{
+    struct mac_font_list files = { 0 }, dirs = { 0 };
+    struct mac_font_dir_stamp *stamps = NULL;
+    BOOL use_cache = mac_font_cache_enabled();
+    unsigned int i, std_count = 0;
+
+    if (use_cache && read_mac_font_cache( &files ))
+        TRACE( "%u font files from the cache\n", files.count );
+    else
+    {
+        if (use_cache)
+        {
+            /* stamp the standard folders before asking CoreText, so that a font installed
+             * meanwhile invalidates the cache */
+            get_mac_font_dirs( NULL, &dirs );
+            std_count = dirs.count;
+            if ((stamps = malloc( std_count * sizeof(*stamps) )))
+                for (i = 0; i < std_count; i++) get_mac_font_dir_stamp( dirs.paths[i], &stamps[i] );
+        }
+        get_mac_font_files( &files );
+        TRACE( "%u font files from CoreText\n", files.count );
+        if (stamps && files.count)
+        {
+            struct mac_font_dir_stamp *new_stamps;
+
+            get_mac_font_dirs( &files, &dirs );
+            if ((new_stamps = realloc( stamps, dirs.count * sizeof(*stamps) )))
+            {
+                stamps = new_stamps;
+                for (i = std_count; i < dirs.count; i++) get_mac_font_dir_stamp( dirs.paths[i], &stamps[i] );
+                write_mac_font_cache( &files, &dirs, stamps );
+            }
+        }
+    }
+
+    for (i = 0; i < files.count; i++)
+    {
+        TRACE("font file %s\n", files.paths[i]);
+        AddFontToList(NULL, files.paths[i], NULL, 0, ADDFONT_EXTERNAL_FONT);
+    }
+
+    free( stamps );
+    mac_font_list_free( &dirs );
+    mac_font_list_free( &files );
 }
 
 #endif
