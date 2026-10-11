@@ -1143,6 +1143,7 @@ static NSString* metal_layer_filter(BOOL mode)
         [latentChildWindows release];
         [latentParentWindow release];
         [contentViewMaskLayer release];
+        [fullScreenBackdropLayer release];
         [super dealloc];
     }
 
@@ -1380,11 +1381,26 @@ static NSString* metal_layer_filter(BOOL mode)
 
             if (source.size.width > 0 && source.size.height > 0)
             {
+                CGFloat backing = fmax([self backingScaleFactor], 1);
                 CGFloat scale = fmin(frameSize.width / source.size.width, frameSize.height / source.size.height);
-                bounds.size.width = frameSize.width / scale;
-                bounds.size.height = frameSize.height / scale;
-                bounds.origin.x = source.origin.x - (bounds.size.width - source.size.width) / 2;
-                bounds.origin.y = source.origin.y - (bounds.size.height - source.size.height) / 2;
+                NSSize fit;
+                NSPoint offset;
+
+                /* Content that already fits is shown 1:1, never resampled. */
+                if (source.size.width <= frameSize.width + 0.5 / backing &&
+                    source.size.height <= frameSize.height + 0.5 / backing)
+                    scale = 1;
+
+                /* Put the content on whole device pixels, centred. */
+                fit.width = round(source.size.width * scale * backing) / backing;
+                fit.height = round(source.size.height * scale * backing) / backing;
+                offset.x = round((frameSize.width - fit.width) / 2 * backing) / backing;
+                offset.y = round((frameSize.height - fit.height) / 2 * backing) / backing;
+
+                bounds.size.width = frameSize.width * source.size.width / fit.width;
+                bounds.size.height = frameSize.height * source.size.height / fit.height;
+                bounds.origin.x = source.origin.x - offset.x * source.size.width / fit.width;
+                bounds.origin.y = source.origin.y - offset.y * source.size.height / fit.height;
             }
         }
 
@@ -1397,6 +1413,42 @@ static NSString* metal_layer_filter(BOOL mode)
             [contentView setNeedsDisplay:YES];
             [self updateMaskLayer];
         }
+        [self updateFullScreenBackdrop];
+    }
+
+    /* In the full-screen space only the program's Metal/OpenGL content is
+       shown: everything it doesn't cover is black, not the window surface
+       under it (which a Direct3D program never paints, so it is white).  An
+       opaque layer of our own, below the client views, covers the content
+       view's visible bounds.  The view's own layer is left alone: changing
+       its background or redisplaying it on every frame change makes AppKit
+       reveal the full-screen title bar. */
+    - (void) updateFullScreenBackdrop
+    {
+        CALayer* layer = [[self contentView] layer];
+
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        if (inAutoFullScreen && layer)
+        {
+            if (!fullScreenBackdropLayer)
+            {
+                fullScreenBackdropLayer = [[CALayer alloc] init];
+                fullScreenBackdropLayer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+                fullScreenBackdropLayer.opaque = YES;
+                fullScreenBackdropLayer.zPosition = -1000;
+            }
+            if (fullScreenBackdropLayer.superlayer != layer)
+                [layer insertSublayer:fullScreenBackdropLayer atIndex:0];
+            fullScreenBackdropLayer.frame = layer.bounds;
+        }
+        else if (fullScreenBackdropLayer)
+        {
+            [fullScreenBackdropLayer removeFromSuperlayer];
+            [fullScreenBackdropLayer release];
+            fullScreenBackdropLayer = nil;
+        }
+        [CATransaction commit];
     }
 
     - (void) setWindowFeatures:(const struct macdrv_window_features*)wf
