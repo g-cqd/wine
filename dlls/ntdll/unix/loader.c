@@ -708,6 +708,47 @@ static WORD get_pe_file_machine( const char *path )
     return ret;
 }
 
+/* The x87sidecar sets ROSETTA_DISABLE_AOT=1 for the process it starts, so that
+ * Rosetta JIT-translates all of it and the x87 hook is reached. Rosetta reads the
+ * variable once, when a process starts. Left in place, it is inherited by every
+ * process the hooked one starts: a 64-bit child, which never runs under the
+ * sidecar, then loses Rosetta's ahead-of-time translation of its unix libraries
+ * and JIT-translates them at every start, at about twice the CPU time. So
+ * preloader_exec saves the value from before the sidecar in this variable, as
+ * "=value", or "-" if it was unset, and the started process puts it back as soon
+ * as it runs (restore_rosetta_aot_env). */
+#define X87_SAVED_AOT_ENV "WINE_X87_SAVED_ROSETTA_DISABLE_AOT"
+
+static void save_rosetta_aot_env(void)
+{
+    const char *aot = getenv( "ROSETTA_DISABLE_AOT" );
+    char *saved = NULL;
+
+    if (!aot) setenv( X87_SAVED_AOT_ENV, "-", 1 );
+    else if (asprintf( &saved, "=%s", aot ) != -1)
+    {
+        setenv( X87_SAVED_AOT_ENV, saved, 1 );
+        free( saved );
+    }
+}
+
+/***********************************************************************
+ *           restore_rosetta_aot_env
+ *
+ * Put back the ROSETTA_DISABLE_AOT that this process had before the x87sidecar
+ * started it, so that the processes it starts do not inherit the sidecar's
+ * setting. Rosetta has read the variable by now, so this process keeps it.
+ */
+static void restore_rosetta_aot_env(void)
+{
+    const char *saved = getenv( X87_SAVED_AOT_ENV );
+
+    if (!saved) return;
+    if (saved[0] == '=') setenv( "ROSETTA_DISABLE_AOT", saved + 1, 1 );
+    else unsetenv( "ROSETTA_DISABLE_AOT" );
+    unsetenv( X87_SAVED_AOT_ENV );
+}
+
 static void preloader_exec( char **argv, const char *image_path, WORD machine )
 {
     const char *rosetta_path;
@@ -793,7 +834,9 @@ static void preloader_exec( char **argv, const char *image_path, WORD machine )
             for (i = 1; i <= n; i++) coop_argv[i + 1] = argv[i]; /* copies argv[1..] + NULL terminator */
             ERR( "ROSETTA_X87_PATH: attaching rosettax87 --cooperative (%s) for %s\n",
                  rosetta_path, target );
+            save_rosetta_aot_env();
             execv( coop_argv[0], coop_argv );
+            unsetenv( X87_SAVED_AOT_ENV );
         }
     }
 
@@ -2852,6 +2895,7 @@ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
      * task port to the sidecar and wait for its x87 JIT hook before running. */
     x87_cooperative_handshake();
 #endif
+    restore_rosetta_aot_env();
 
     init_paths();
     if (!getenv( "WINELOADERNOEXEC" ) || argc <= 1) check_command_line( argc, argv );
