@@ -95,6 +95,7 @@
     BOOL suppressAutoFullScreen;      /* the user left it; don't re-enter */
     NSRect fullScreenWineFrame;       /* frame Win32 set, Cocoa coordinates */
     NSRect fullScreenSourceRect;      /* mask rect in content coordinates, or empty */
+    CALayer* fullScreenBackdropLayer; /* black under the client views while in the space */
 }
 
 @property (retain, readonly, nonatomic) WineEventQueue* queue;
