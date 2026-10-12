@@ -48,6 +48,11 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(seh);
 
+/* set by the unix loader from the ntdll mapping it created itself, so
+ * that native code tampering with the loader list cannot hide ntdll */
+void *ntdll_image_base;
+unsigned int ntdll_image_size;
+
 static const void *ntdll_base;
 static const void *win32u_base;
 static unsigned int ntdll_size;
@@ -74,18 +79,26 @@ static BOOL match_base_dll_name( const LDR_DATA_TABLE_ENTRY *mod, const char *na
 }
 
 /* find the images that contain wine syscall stubs; called lazily, also from
- * a signal handler, so it only reads memory that is stable after startup */
+ * a signal handler, so it only reads memory that is stable after startup.
+ * ntdll is normally known from the loader; the loader list is only walked
+ * for win32u, and as a fallback if the loader did not record ntdll. */
 static void find_wine_syscall_modules( void )
 {
     LIST_ENTRY *head, *entry;
     int count = 0;
+
+    if (ntdll_image_base)
+    {
+        ntdll_base = ntdll_image_base;
+        ntdll_size = ntdll_image_size;
+    }
 
     head = &NtCurrentTeb()->Peb->LdrData->InLoadOrderModuleList;
     for (entry = head->Flink; entry != head && count++ < 32; entry = entry->Flink)
     {
         LDR_DATA_TABLE_ENTRY *mod = CONTAINING_RECORD( entry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks );
 
-        if (match_base_dll_name( mod, "ntdll.dll", 9 ))
+        if (!ntdll_base && match_base_dll_name( mod, "ntdll.dll", 9 ))
         {
             ntdll_base = mod->DllBase;
             ntdll_size = mod->SizeOfImage;

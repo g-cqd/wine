@@ -2454,6 +2454,11 @@ static void load_ntdll(void)
     if (status == STATUS_IMAGE_NOT_AT_BASE) status = virtual_relocate_module( module );
     if (status) fatal_error( "failed to load %s error %x\n", name, status );
     free( name );
+#ifdef __x86_64__
+    /* record the mapping for the raw-syscall emulation (unix/winsyscall.c) */
+    ntdll_image_base = module;
+    ntdll_image_size = info.ImageFileSize;
+#endif
     load_ntdll_functions( module );
     if (is_arm64ec()) redirect_ntdll_functions( module );
 }

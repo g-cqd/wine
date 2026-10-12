@@ -746,6 +746,10 @@ static inline int is_gdt_sel( WORD sel )
 /* set on syscall numbers that exist on Windows but have no wine stub */
 #define WIN_SYSCALL_KNOWN 0x80000000
 
+/* set by the loader from the ntdll mapping (unix/winsyscall.c) */
+extern void *ntdll_image_base;
+extern unsigned int ntdll_image_size;
+
 extern BOOL is_wine_syscall_stub_address( ULONG64 addr );
 extern unsigned int wine_syscall_id_for_windows_nr( unsigned int nr );
 
