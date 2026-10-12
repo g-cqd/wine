@@ -22,6 +22,7 @@ SOURCES = \
 	rtlstr.c \
 	string.c \
 	sync.c \
+	syscall.c \
 	testdll.c \
 	testdll.spec \
 	thread.c \
