@@ -72,10 +72,10 @@ static void test_raw_syscall_dispatch( void )
 
     /* The same call through the ntdll stub and through a raw syscall with
      * the Windows number must return the same status.  An invalid NLS
-     * section type fails inside wine's implementation before any output
-     * pointer is dereferenced. */
+     * section type fails with STATUS_INVALID_PARAMETER, like on Windows,
+     * before any output pointer is dereferenced. */
     direct = pNtGetNlsSectionPtr( 0xdeadbeef, 0, NULL, NULL, NULL );
-    ok( direct != STATUS_SUCCESS, "NtGetNlsSectionPtr unexpectedly succeeded\n" );
+    ok( direct == STATUS_INVALID_PARAMETER, "NtGetNlsSectionPtr returned %08lx, expected STATUS_INVALID_PARAMETER\n", direct );
 
     raw = raw_syscall( WIN10_19045_NtGetNlsSectionPtr, 0xdeadbeef, 0, 0, 0, 0 );
     ok( raw == direct, "raw syscall %#x returned %08lx, expected %08lx (stub result)\n",
