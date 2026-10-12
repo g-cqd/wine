@@ -2455,9 +2455,9 @@ static void load_ntdll(void)
     if (status) fatal_error( "failed to load %s error %x\n", name, status );
     free( name );
 #ifdef __x86_64__
-    /* record the mapping for the raw-syscall emulation (unix/winsyscall.c) */
-    ntdll_image_base = module;
-    ntdll_image_size = info.ImageFileSize;
+    /* resolve the Windows syscall table before any guest code can patch
+     * the syscall stubs (unix/winsyscall.c) */
+    init_windows_syscall_cache( module, info.ImageFileSize );
 #endif
     load_ntdll_functions( module );
     if (is_arm64ec()) redirect_ntdll_functions( module );
