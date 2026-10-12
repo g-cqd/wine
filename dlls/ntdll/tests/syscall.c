@@ -82,6 +82,83 @@ static void test_raw_syscall_dispatch( void )
         WIN10_19045_NtGetNlsSectionPtr, raw, direct );
 }
 
+/* Execute a syscall instruction directly with distinctive flags set, and
+ * report the register state the Windows kernel leaves behind: the status
+ * in rax, the return address in rcx, the pre-syscall flags in r11, and
+ * the post-syscall flags. */
+static NTSTATUS raw_syscall_probe( unsigned int nr, ULONG_PTR arg1, ULONG_PTR arg2,
+                                   ULONG_PTR arg3, ULONG_PTR arg4, ULONG_PTR arg5,
+                                   ULONG64 set_flags, ULONG64 *ret_rcx,
+                                   ULONG64 *ret_r11, ULONG64 *post_flags )
+{
+    NTSTATUS status;
+    ULONG64 r11, after;
+    ULONG64 rcx_out;
+    __asm__( "movq %[a1], %%rcx\n\t"
+             "movq %[a2], %%rdx\n\t"
+             "movq %[a3], %%r8\n\t"
+             "movq %[a4], %%r9\n\t"
+             "movq %%rcx, %%r10\n\t"
+             "subq $0x28, %%rsp\n\t"
+             "movq %[a5], 0x28(%%rsp)\n\t"
+             "pushfq\n\t"
+             "popq %%rsi\n\t"             /* original flags */
+             "orq %[sf], %%rsi\n\t"       /* force the bits under test */
+             "pushq %%rsi\n\t"
+             "popfq\n\t"
+             "movl %[nr], %%eax\n\t"
+             "syscall\n\t"
+             "movq %%r11, %[r11]\n\t"
+             "movq %%rcx, %[rcxo]\n\t"
+             "pushfq\n\t"
+             "popq %[after]\n\t"
+             "addq $0x28, %%rsp\n\t"
+             : [out] "=a"(status), [r11] "=r"(r11), [rcxo] "=r"(rcx_out), [after] "=r"(after)
+             : [nr] "g"(nr), [a1] "g"(arg1), [a2] "g"(arg2), [a3] "g"(arg3),
+               [a4] "g"(arg4), [a5] "g"(arg5), [sf] "r"(set_flags)
+             : "rcx", "rdx", "r8", "r9", "r10", "rsi", "memory" );
+    *ret_rcx = rcx_out;
+    *ret_r11 = r11;
+    *post_flags = after;
+    return status;
+}
+
+static void test_raw_syscall_register_semantics( void )
+{
+    static const struct { ULONG64 mask; const char *name; } flag_tests[] =
+    {
+        { 0x202,   "IF|bit1" },   /* interrupt flag + always-one bit */
+        { 0x400,   "DF" },        /* direction flag */
+        { 0x40000, "AC" },       /* alignment check */
+    };
+    NTSTATUS status, direct;
+    ULONG64 rcx, r11, post_flags;
+    unsigned int i;
+
+    /* Windows semantics: syscall stores RFLAGS in r11 and leaves the
+     * return address in rcx; sysret restores the flags.  The emulated
+     * syscall must do the same, for every flag bit the caller set. */
+    for (i = 0; i < ARRAY_SIZE(flag_tests); i++)
+    {
+        status = raw_syscall_probe( WIN10_19045_NtGetNlsSectionPtr, 0xdeadbeef, 0, 0, 0, 0,
+                                    flag_tests[i].mask, &rcx, &r11, &post_flags );
+
+        ok( (r11 & flag_tests[i].mask) == flag_tests[i].mask,
+            "%s: r11 = %s, expected set flags preserved\n",
+            flag_tests[i].name, wine_dbgstr_longlong( r11 ) );
+        ok( (post_flags & flag_tests[i].mask) == flag_tests[i].mask,
+            "%s: post-syscall flags = %s, expected set flags restored\n",
+            flag_tests[i].name, wine_dbgstr_longlong( post_flags ) );
+    }
+
+    status = raw_syscall_probe( WIN10_19045_NtGetNlsSectionPtr, 0xdeadbeef, 0, 0, 0, 0,
+                                0x202, &rcx, &r11, &post_flags );
+    direct = pNtGetNlsSectionPtr( 0xdeadbeef, 0, NULL, NULL, NULL );
+    ok( status == direct, "raw syscall returned %08lx, expected %08lx\n", status, direct );
+    /* rcx must hold the address of the instruction after the syscall */
+    ok( (rcx & 0xfff) != 0, "rcx = %s, expected a return address\n", wine_dbgstr_longlong( rcx ) );
+}
+
 static void test_raw_syscall_invalid_number( void )
 {
     NTSTATUS raw;
@@ -110,5 +187,6 @@ START_TEST(syscall)
     if (!pNtGetNlsSectionPtr) return;
     test_raw_syscall_dispatch();
     test_raw_syscall_invalid_number();
+    test_raw_syscall_register_semantics();
 #endif
 }
