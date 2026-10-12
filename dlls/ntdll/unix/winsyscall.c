@@ -48,6 +48,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(seh);
 
+extern NTSTATUS WINAPI NtGetNlsSectionPtr( ULONG type, ULONG id, void *unknown, void **ptr, SIZE_T *size );
+
 static const void *ntdll_base;
 static const void *win32u_base;
 static unsigned int ntdll_size;
@@ -111,8 +113,10 @@ BOOL is_wine_syscall_stub_address( ULONG64 addr )
 /* the wine ntdll syscall stubs start with "mov r10,rcx; mov eax,<id>" */
 static const BYTE stub_prefix[] = { 0x4c, 0x8b, 0xd1, 0xb8 };
 
-/* return the wine syscall id stored in the ntdll stub exporting name,
- * or 0 if ntdll does not export such a syscall stub */
+/* return the wine syscall table index for the ntdll stub exporting name,
+ * or 0 if ntdll does not export such a syscall stub.  The index stored in
+ * the stub is 0-based; the dispatcher table is indexed one past it (the
+ * first table entry is reserved), hence the +1. */
 static unsigned int get_wine_syscall_id( const char *name )
 {
     const IMAGE_DOS_HEADER *dos = ntdll_base;
@@ -137,12 +141,12 @@ static unsigned int get_wine_syscall_id( const char *name )
     {
         const char *export_name = (const char *)ntdll_base + names[i];
         if (memcmp( export_name, name, len + 1 )) continue;
-        if (ordinals[i] >= exports->NumberOfFunctions) return 0;
+        if (ordinals[i] < exports->Base || ordinals[i] - exports->Base >= exports->NumberOfFunctions) return 0;
         {
-            const char *func = (const char *)ntdll_base + functions[ordinals[i]];
+            const char *func = (const char *)ntdll_base + functions[ordinals[i] - exports->Base];
             if ((ULONG64)(func + 8 - (const char *)ntdll_base) >= ntdll_size) return 0;
             if (memcmp( func, stub_prefix, sizeof(stub_prefix) )) return 0;
-            return *(const unsigned int *)(func + 4);
+            return *(const unsigned int *)(func + 4) + 1;
         }
     }
     return 0;
@@ -170,6 +174,12 @@ static void load_windows_syscall_cache( void )
         else TRACE( "ntdll base %p has no DOS signature\n", ntdll_base );
     }
     else TRACE( "ntdll image not found\n" );
+    {
+        unsigned int id = get_wine_syscall_id( "NtGetNlsSectionPtr" );
+        if (id) TRACE( "service table entry %#x = %p, NtGetNlsSectionPtr at %p\n",
+                       id, (void *)KeServiceDescriptorTable[0].ServiceTable[id],
+                       (void *)&NtGetNlsSectionPtr );
+    }
     for (i = 0; i < ARRAY_SIZE( windows_syscalls_WIN10_19045 ); i++)
     {
         unsigned int nr = windows_syscalls_WIN10_19045[i].nr;
