@@ -48,11 +48,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(seh);
 
-/* set by the unix loader from the ntdll mapping it created itself, so
- * that native code tampering with the loader list cannot hide ntdll */
-void *ntdll_image_base;
-unsigned int ntdll_image_size;
-
 static const void *ntdll_base;
 static const void *win32u_base;
 static unsigned int ntdll_size;
@@ -78,20 +73,13 @@ static BOOL match_base_dll_name( const LDR_DATA_TABLE_ENTRY *mod, const char *na
     return TRUE;
 }
 
-/* find the images that contain wine syscall stubs; called lazily, also from
- * a signal handler, so it only reads memory that is stable after startup.
- * ntdll is normally known from the loader; the loader list is only walked
- * for win32u, and as a fallback if the loader did not record ntdll. */
+/* find the images that contain wine syscall stubs; called lazily as a
+ * fallback for processes where the loader-time resolution did not run
+ * (normally the cache is already loaded by then) */
 static void find_wine_syscall_modules( void )
 {
     LIST_ENTRY *head, *entry;
     int count = 0;
-
-    if (ntdll_image_base)
-    {
-        ntdll_base = ntdll_image_base;
-        ntdll_size = ntdll_image_size;
-    }
 
     head = &NtCurrentTeb()->Peb->LdrData->InLoadOrderModuleList;
     for (entry = head->Flink; entry != head && count++ < 32; entry = entry->Flink)
@@ -167,6 +155,21 @@ static void load_windows_syscall_cache( void )
     unsigned int i, resolved = 0;
 
     if (!ntdll_base) find_wine_syscall_modules();
+    if (ntdll_base)
+    {
+        const IMAGE_DOS_HEADER *dos = ntdll_base;
+        if (dos->e_magic == IMAGE_DOS_SIGNATURE)
+        {
+            const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)((const char *)ntdll_base + dos->e_lfanew);
+            const IMAGE_DATA_DIRECTORY *dir = nt->OptionalHeader.DataDirectory;
+            const IMAGE_EXPORT_DIRECTORY *exports = (const IMAGE_EXPORT_DIRECTORY *)((const char *)ntdll_base + dir->VirtualAddress);
+            TRACE( "ntdll %p size %x, export dir at %x size %x, %u names / %u functions\n",
+                   ntdll_base, ntdll_size, dir->VirtualAddress, dir->Size,
+                   exports->NumberOfNames, exports->NumberOfFunctions );
+        }
+        else TRACE( "ntdll base %p has no DOS signature\n", ntdll_base );
+    }
+    else TRACE( "ntdll image not found\n" );
     for (i = 0; i < ARRAY_SIZE( windows_syscalls_WIN10_19045 ); i++)
     {
         unsigned int nr = windows_syscalls_WIN10_19045[i].nr;
@@ -178,6 +181,15 @@ static void load_windows_syscall_cache( void )
     TRACE( "%u of %u Windows syscalls resolved to wine stubs\n",
            resolved, (unsigned int)ARRAY_SIZE( windows_syscalls_WIN10_19045 ) );
     nr_cache_loaded = TRUE;
+}
+
+/* resolve the whole cache at ntdll load time, before any guest code can
+ * patch the syscall stubs (native loaders hook them) */
+void init_windows_syscall_cache( void *base, unsigned int size )
+{
+    ntdll_base = base;
+    ntdll_size = size;
+    load_windows_syscall_cache();
 }
 
 /* map a Windows 10 19045 syscall number to the wine syscall id of the
