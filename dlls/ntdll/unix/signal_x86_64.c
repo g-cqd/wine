@@ -3104,29 +3104,78 @@ __ASM_GLOBAL_FUNC( __restore_mxcsr_thunk,
  *		sigsys_handler
  *
  * Handler for SIGSYS, signals that a non-existent system call was invoked.
- * Only called on macOS 14 Sonoma and later.
+ * Only called on macOS 14 Sonoma and later.  Syscalls executed by wine's
+ * own stubs are dispatched as usual; a syscall from native code using the
+ * Windows ABI is emulated by dispatching the wine syscall stub of the
+ * Windows function with the same number (see unix/winsyscall.c).
  */
 static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 {
     extern const void *__wine_syscall_dispatcher_prolog_end_ptr;
     ucontext_t *ucontext = init_handler( sigcontext );
     struct syscall_frame *frame = get_syscall_frame();
+    ULONG64 rip = RIP_sig( ucontext );
 
-    TRACE_(seh)("SIGSYS, rax %#llx, rip %#llx.\n", RAX_sig(ucontext), RIP_sig(ucontext));
+    TRACE_(seh)("SIGSYS, rax %#llx, rip %#llx.\n", RAX_sig(ucontext), (unsigned long long)rip);
 
-    frame->rip = RIP_sig(ucontext) + 0xb;
-    frame->rcx = RIP_sig(ucontext);
-    frame->eflags = EFL_sig(ucontext);
-    frame->restore_flags = 0;
-    if (instrumentation_callback) frame->restore_flags |= RESTORE_FLAGS_INSTRUMENTATION;
-    RCX_sig(ucontext) = (ULONG_PTR)frame;
-    R11_sig(ucontext) = tf_guest_flags( frame->eflags );
-    if (EFL_sig(ucontext) & 0x100)
+    /* a syscall from an image without wine syscall stubs is native code
+     * using the Windows syscall ABI (first argument in r10, further
+     * register arguments in rdx/r8/r9, stack arguments at rsp+0x28).
+     * Service it through the wine syscall stub of the Windows function
+     * with the same number, or fail like the Windows kernel if the
+     * number is not a Windows syscall.  macOS delivers SIGSYS with rip
+     * already advanced to the instruction after the syscall. */
+    if (!is_wine_syscall_stub_address( rip ))
     {
-        EFL_sig(ucontext) &= ~0x100;  /* clear single-step flag */
-        frame->restore_flags |= CONTEXT_CONTROL;
+        unsigned int id = wine_syscall_id_for_windows_nr( (unsigned int)RAX_sig(ucontext) );
+
+        TRACE_(seh)("foreign syscall %#x at %p -> wine id %#x.\n", (unsigned int)RAX_sig(ucontext), (void *)rip, id);
+
+        if (id && !(id & WIN_SYSCALL_KNOWN))
+        {
+            /* resume at the instruction after the syscall instruction;
+             * the dispatcher adjusts the return address by -0xb
+             * (Legends of Runeterra hack), compensate for it */
+            frame->rip = rip + 0xb;
+            frame->rcx = rip;           /* Windows leaves the return address in rcx */
+            frame->eflags = EFL_sig( ucontext );
+            frame->restore_flags = 0;
+            if (instrumentation_callback) frame->restore_flags |= RESTORE_FLAGS_INSTRUMENTATION;
+            RAX_sig( ucontext ) = id;
+            RCX_sig( ucontext ) = (ULONG_PTR)frame;
+            R11_sig( ucontext ) = tf_guest_flags( frame->eflags );
+            if (EFL_sig( ucontext ) & 0x100)
+            {
+                EFL_sig( ucontext ) &= ~0x100;  /* clear single-step flag */
+                frame->restore_flags |= CONTEXT_CONTROL;
+            }
+            RIP_sig( ucontext ) = (ULONG64)__wine_syscall_dispatcher_prolog_end_ptr;
+        }
+        else
+        {
+            RAX_sig( ucontext ) = (id & WIN_SYSCALL_KNOWN) ? STATUS_NOT_IMPLEMENTED
+                                                           : STATUS_INVALID_SYSTEM_SERVICE;
+            RCX_sig( ucontext ) = rip;   /* Windows leaves the return address in rcx */
+            R11_sig( ucontext ) = EFL_sig( ucontext );
+            return;
+        }
     }
-    RIP_sig(ucontext) = (ULONG64)__wine_syscall_dispatcher_prolog_end_ptr;
+    else
+    {
+        frame->rip = rip + 0xb;
+        frame->rcx = rip;
+        frame->eflags = EFL_sig( ucontext );
+        frame->restore_flags = 0;
+        if (instrumentation_callback) frame->restore_flags |= RESTORE_FLAGS_INSTRUMENTATION;
+        RCX_sig( ucontext ) = (ULONG_PTR)frame;
+        R11_sig( ucontext ) = tf_guest_flags( frame->eflags );
+        if (EFL_sig( ucontext ) & 0x100)
+        {
+            EFL_sig( ucontext ) &= ~0x100;  /* clear single-step flag */
+            frame->restore_flags |= CONTEXT_CONTROL;
+        }
+        RIP_sig( ucontext ) = (ULONG64)__wine_syscall_dispatcher_prolog_end_ptr;
+    }
 
     /* CW Hack 24265 */
     if (is_rosetta2 && FPU_sig(ucontext))
