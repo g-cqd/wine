@@ -231,6 +231,8 @@ NTSTATUS WINAPI RtlQueryEnvironmentVariable( WCHAR *env, const WCHAR *name, SIZE
     SIZE_T len = 0;
     const WCHAR *var;
 
+    TRACE("%p %s %Iu\n", env, debugstr_wn( name, namelen ), value_length );
+
     if (!namelen) return nts;
 
     if (!env)
