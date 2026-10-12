@@ -191,7 +191,7 @@ static NTSTATUS get_nls_section_name( UINT type, UINT id, WCHAR name[32] )
         snprintf( buffer, sizeof(buffer), "\\NLS\\NlsSectionNORM%08x", id);
         break;
     default:
-        return STATUS_INVALID_PARAMETER_1;
+        return STATUS_INVALID_PARAMETER;
     }
     ascii_to_unicode( name, buffer, strlen(buffer) + 1 );
     return STATUS_SUCCESS;
