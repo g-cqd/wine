@@ -1762,7 +1762,14 @@
 @ cdecl -norelay __wine_dbg_strdup(str)
 
 # Version
-@ cdecl wine_get_version()
+# CW HACK 14392: foreign fingerprinting code probes ntdll for wine-only
+# exports (wine_get_version, by GetProcAddress and raw export-table scan).
+# Rename the probed name so both lookups fail cleanly; wine's own consumers
+# resolve it dynamically and fall back gracefully.  wine_get_host_version and
+# wine_get_build_id keep their names: shell32's shell-folder registration and
+# the recycle bin import them by name, and renaming them makes the loader bind
+# an unimplemented stub and wineboot abort prefix updates.
+@ cdecl xine_get_version() wine_get_version
 @ cdecl wine_get_build_id()
 @ cdecl wine_get_host_version(ptr ptr)
 

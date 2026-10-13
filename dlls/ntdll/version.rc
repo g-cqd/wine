@@ -16,8 +16,12 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#define WINE_FILEDESCRIPTION_STR "Wine ntdll"
+/* CW HACK 14392: foreign fingerprinting code reads the ntdll version
+ * resource (fixed file info and the string block) to identify the OS build.
+ * Stamp it as Windows 10 19045 instead of wine 6.1.7601. */
+#define WINE_FILEDESCRIPTION_STR "NT Layer DLL"
 #define WINE_FILENAME_STR "ntdll.dll"
-#define WINE_FILEVERSION 6,1,7601,24059
+#define WINE_FILEVERSION 10,0,19045,5804
+#define WINE_PRODUCTNAME_STR "Microsoft(R) Windows(R) Operating System"
 
 #include "wine/wine_common_ver.rc"
