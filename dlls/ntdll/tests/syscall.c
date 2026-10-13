@@ -41,6 +41,7 @@
 #define WIN10_19045_SYSCALL_COUNT 0x01d9
 
 static NTSTATUS (WINAPI *pNtGetNlsSectionPtr)(ULONG, ULONG, void *, void **, SIZE_T *);
+static NTSTATUS (WINAPI *pZwSetThreadExecutionState)(EXECUTION_STATE, EXECUTION_STATE *);
 
 /* Execute a syscall instruction directly, with the register and stack
  * state the Windows kernel expects at the instruction:
@@ -170,12 +171,80 @@ static void test_raw_syscall_invalid_number( void )
     ok( raw == STATUS_INVALID_SYSTEM_SERVICE, "unknown syscall returned %08lx\n", raw );
 }
 
+/* the six ntdll Zw stubs the EA anti-cheat (Javelin) loader hashes; the
+ * syscall numbers they carry on Windows 10 build 19045 (x86-64) */
+static const struct { const char *name; unsigned int nr; } eaac_zw_stubs[] =
+{
+    { "ZwSetInformationKey",           0x19a },
+    { "ZwSetInformationToken",         0x19d },
+    { "ZwSetInformationVirtualMemory", 0x1a0 },
+    { "ZwSetIntervalProfile",          0x1a2 },
+    { "ZwSetSystemTime",               0x1ae },
+    { "ZwSetThreadExecutionState",     0x1af },
+};
+
+static void test_zw_stub_windows_bytes( void )
+{
+    static const BYTE win10_stub[23] =
+    {
+        0x4c,0x8b,0xd1,                    /* mov r10,rcx */
+        0xb8,0,0,0,0,                      /* mov eax,<nr> */
+        0xf6,0x04,0x25,0x08,0x03,0xfe,0x7f,0x01,  /* test byte [0x7ffe0308],1 */
+        0x75,0x03,                         /* jne +3 */
+        0x0f,0x05,                         /* syscall */
+        0xc3,                              /* ret */
+        0xcd,0x29,                         /* int 0x29 */
+        0xc3                               /* ret */
+    };
+    HMODULE ntdll = GetModuleHandleW( L"ntdll.dll" );
+    BYTE expect[sizeof(win10_stub)];
+    BYTE *page;
+    unsigned int i;
+    DWORD old_prot;
+    EXECUTION_STATE old;
+
+    /* reference call through the unpatched wine stub */
+    ok( pZwSetThreadExecutionState( ES_CONTINUOUS, &old ) == STATUS_SUCCESS,
+        "ZwSetThreadExecutionState failed before the patch\n" );
+
+    /* the anti-cheat gate dance: an execute fault on a read-only page.
+     * The unix side must patch the fingerprinted Zw stubs here. */
+    page = VirtualAlloc( NULL, 0x1000, MEM_COMMIT, PAGE_READWRITE );
+    ok( page != NULL, "VirtualAlloc failed\n" );
+    if (!page) return;
+    page[0] = 0xc3;
+    ok( VirtualProtect( page, 0x1000, PAGE_READONLY, &old_prot ), "VirtualProtect failed\n" );
+    __try { ((void (*)(void))page)(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    for (i = 0; i < ARRAY_SIZE(eaac_zw_stubs); i++)
+    {
+        const BYTE *stub = (const BYTE *)GetProcAddress( ntdll, eaac_zw_stubs[i].name );
+        ok( stub != NULL, "%s not found\n", eaac_zw_stubs[i].name );
+        if (!stub) continue;
+        memcpy( expect, win10_stub, sizeof(expect) );
+        *(DWORD *)(expect + 4) = eaac_zw_stubs[i].nr;
+        ok( memcmp( stub, expect, sizeof(expect) ) == 0,
+            "%s does not hold the Windows 10 19045 stub (nr %x)\n",
+            eaac_zw_stubs[i].name, eaac_zw_stubs[i].nr );
+    }
+
+    /* a call through a patched stub must still dispatch to the wine
+     * implementation: STATUS_SUCCESS and the state set by the reference
+     * call (ES_CONTINUOUS) reported as the previous state */
+    ok( pZwSetThreadExecutionState( ES_CONTINUOUS, &old ) == STATUS_SUCCESS
+        && old == ES_CONTINUOUS,
+        "patched ZwSetThreadExecutionState returned old state %08x\n", old );
+}
+
 static void init_function_pointers( void )
 {
     HMODULE ntdll = GetModuleHandleW( L"ntdll.dll" );
 
     pNtGetNlsSectionPtr = (void *)GetProcAddress( ntdll, "NtGetNlsSectionPtr" );
     ok( pNtGetNlsSectionPtr != NULL, "NtGetNlsSectionPtr not found\n" );
+    pZwSetThreadExecutionState = (void *)GetProcAddress( ntdll, "ZwSetThreadExecutionState" );
+    ok( pZwSetThreadExecutionState != NULL, "ZwSetThreadExecutionState not found\n" );
 }
 
 #endif /* __x86_64__ */
@@ -184,9 +253,10 @@ START_TEST(syscall)
 {
 #ifdef __x86_64__
     init_function_pointers();
-    if (!pNtGetNlsSectionPtr) return;
+    if (!pNtGetNlsSectionPtr || !pZwSetThreadExecutionState) return;
     test_raw_syscall_dispatch();
     test_raw_syscall_invalid_number();
     test_raw_syscall_register_semantics();
+    test_zw_stub_windows_bytes();
 #endif
 }

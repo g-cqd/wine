@@ -113,11 +113,10 @@ BOOL is_wine_syscall_stub_address( ULONG64 addr )
 /* the wine ntdll syscall stubs start with "mov r10,rcx; mov eax,<id>" */
 static const BYTE stub_prefix[] = { 0x4c, 0x8b, 0xd1, 0xb8 };
 
-/* return the wine syscall table index for the ntdll stub exporting name,
- * or 0 if ntdll does not export such a syscall stub.  The index stored in
- * the stub is 0-based; the dispatcher table is indexed one past it (the
- * first table entry is reserved), hence the +1. */
-static unsigned int get_wine_syscall_id( const char *name )
+/* find the wine ntdll syscall stub exporting name, or NULL if ntdll
+ * exports no syscall stub under that name.  AddressOfNameOrdinals
+ * entries are direct indices into AddressOfFunctions. */
+static const BYTE *find_wine_syscall_stub( const char *name )
 {
     const IMAGE_DOS_HEADER *dos = ntdll_base;
     const IMAGE_NT_HEADERS64 *nt;
@@ -127,10 +126,10 @@ static unsigned int get_wine_syscall_id( const char *name )
     size_t len = strlen( name );
     unsigned int i;
 
-    if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
     nt = (const IMAGE_NT_HEADERS64 *)((const char *)ntdll_base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-    if (!nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress) return 0;
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return NULL;
+    if (!nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress) return NULL;
     exports = (const IMAGE_EXPORT_DIRECTORY *)((const char *)ntdll_base
               + nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
     names = (const DWORD *)((const char *)ntdll_base + exports->AddressOfNames);
@@ -141,15 +140,33 @@ static unsigned int get_wine_syscall_id( const char *name )
     {
         const char *export_name = (const char *)ntdll_base + names[i];
         if (memcmp( export_name, name, len + 1 )) continue;
-        if (ordinals[i] < exports->Base || ordinals[i] - exports->Base >= exports->NumberOfFunctions) return 0;
+        if (ordinals[i] >= exports->NumberOfFunctions) return NULL;
         {
-            const char *func = (const char *)ntdll_base + functions[ordinals[i] - exports->Base];
-            if ((ULONG64)(func + 8 - (const char *)ntdll_base) >= ntdll_size) return 0;
-            if (memcmp( func, stub_prefix, sizeof(stub_prefix) )) return 0;
-            return *(const unsigned int *)(func + 4) + 1;
+            const char *func = (const char *)ntdll_base + functions[ordinals[i]];
+            if ((ULONG64)(func + 8 - (const char *)ntdll_base) >= ntdll_size) return NULL;
+            if (memcmp( func, stub_prefix, sizeof(stub_prefix) )) return NULL;
+            return (const BYTE *)func;
         }
     }
-    return 0;
+    return NULL;
+}
+
+/* return the wine syscall id for the ntdll stub exporting name, or 0 if
+ * ntdll does not export such a syscall stub.  The id is the 0-based
+ * index the stub loads into eax: the dispatcher receives it unchanged
+ * from wine's own stubs. */
+static unsigned int get_wine_syscall_id( const char *name )
+{
+    const BYTE *stub = find_wine_syscall_stub( name );
+    return stub ? *(const unsigned int *)(stub + 4) : 0;
+}
+
+/* return the address of the wine ntdll syscall stub exporting name, or
+ * 0 if ntdll does not export such a syscall stub */
+ULONG64 get_wine_syscall_stub_address( const char *name )
+{
+    if (!ntdll_base) find_wine_syscall_modules();
+    return (ULONG64)find_wine_syscall_stub( name );
 }
 
 /* resolve the Windows syscall numbers to wine syscall ids; called lazily,
