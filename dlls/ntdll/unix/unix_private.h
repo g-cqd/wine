@@ -749,6 +749,7 @@ static inline int is_gdt_sel( WORD sel )
 extern void init_windows_syscall_cache( void *base, unsigned int size );
 extern BOOL is_wine_syscall_stub_address( ULONG64 addr );
 extern unsigned int wine_syscall_id_for_windows_nr( unsigned int nr );
+extern ULONG64 get_wine_syscall_stub_address( const char *name );
 
 #endif  /* defined(__x86_64__) */
 

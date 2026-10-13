@@ -64,6 +64,7 @@
 #endif
 #ifdef __APPLE__
 # include <mach/mach.h>
+# include <mach/mach_vm.h>
 #endif
 
 #include "ntstatus.h"
@@ -2767,11 +2768,148 @@ static inline BOOL check_invalid_gsbase( ucontext_t *ucontext )
  *
  * Handler for SIGSEGV and related errors.
  */
+/* EA anti-cheat (Javelin) compatibility: between its self-decrypt dance
+ * (a deliberate execute fault on a read-only page of its preloader image)
+ * and its raw syscall probe, the loader reads and hashes six ntdll Zw
+ * stubs.  Wine's stubs have the same shape but differ in the syscall
+ * number and the tail, so the hash fails and the launcher aborts with
+ * E111000D ("Conflicting software detected!").  At the dance, rewrite
+ * the six stubs with the byte-exact Windows 10 19045 stubs.  Calls
+ * through the patched stubs keep working: they raise SIGSYS like wine's
+ * own stubs, and the sigsys wine-stub path translates the Windows
+ * number back to the wine id (is_patched_stub_address below). */
+static const struct { const char *name; ULONG nr; } eaac_zw_stubs[] =
+{
+    { "ZwSetInformationKey",           0x19a },
+    { "ZwSetInformationToken",         0x19d },
+    { "ZwSetInformationVirtualMemory", 0x1a0 },
+    { "ZwSetIntervalProfile",          0x1a2 },
+    { "ZwSetSystemTime",               0x1ae },
+    { "ZwSetThreadExecutionState",     0x1af },
+};
+static ULONG64 eaac_patched_stubs[ARRAY_SIZE(eaac_zw_stubs)];
+static BOOL eaac_stubs_patched;
+
+static BOOL is_patched_stub_address( ULONG64 addr )
+{
+    unsigned int i;
+    for (i = 0; i < ARRAY_SIZE(eaac_patched_stubs); i++)
+        if (eaac_patched_stubs[i] == addr) return TRUE;
+    return FALSE;
+}
+
+static void patch_zw_stubs_to_windows(void)
+{
+    static const BYTE win10_stub[23] = {
+        0x4c,0x8b,0xd1,                    /* mov r10,rcx */
+        0xb8,0,0,0,0,                       /* mov eax,<nr> */
+        0xf6,0x04,0x25,0x08,0x03,0xfe,0x7f,0x01,  /* test byte [0x7ffe0308],1 */
+        0x75,0x03,                          /* jne +3 */
+        0x0f,0x05,                          /* syscall */
+        0xc3,                               /* ret */
+        0xcd,0x29,                          /* int 0x29 */
+        0xc3                                /* ret */
+    };
+    static const BYTE stub_prefix[] = { 0x4c, 0x8b, 0xd1, 0xb8 };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(eaac_zw_stubs); i++)
+    {
+        /* resolve the stub by name so a rebuilt ntdll cannot shift it */
+        BYTE *addr = (BYTE *)get_wine_syscall_stub_address( eaac_zw_stubs[i].name );
+        BYTE buf[23];
+        ULONG64 first, last;
+        memcpy( buf, win10_stub, sizeof(buf) );
+        *(ULONG *)(buf + 4) = eaac_zw_stubs[i].nr;
+        if (!addr || memcmp( addr, stub_prefix, sizeof(stub_prefix) ))
+        {
+            TRACE_(seh)( "stub patch: %s not resolved to a wine syscall stub\n", eaac_zw_stubs[i].name );
+            continue;
+        }
+        /* the ntdll code pages are r-x; flip to write, patch, restore */
+        first = (ULONG64)addr & ~0xfff;
+        last = ((ULONG64)addr + sizeof(buf) - 1) & ~0xfff;
+        if (mprotect( (void *)first, last - first + 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC ))
+        {
+            TRACE_(seh)( "stub patch: mprotect failed at %p\n", addr );
+            continue;
+        }
+        memcpy( addr, buf, sizeof(buf) );
+        mprotect( (void *)first, last - first + 0x1000, PROT_READ | PROT_EXEC );
+        eaac_patched_stubs[i] = (ULONG64)addr;
+    }
+    TRACE_(seh)( "patched %u Zw stubs to Windows 19045 bytes\n", (unsigned int)ARRAY_SIZE(eaac_zw_stubs) );
+}
+
+/* the preloader's self-decrypt dance: an execute fault on a page that is
+ * mapped readable but not executable.  Wine code never fetches from such
+ * a page; JIT runtimes fault this way at worst, and the patch preserves
+ * semantics, so treating any such fault as the dance is safe. */
+static BOOL is_execute_fault_on_readable_page( int signal, siginfo_t *siginfo,
+                                               ucontext_t *ucontext )
+{
+    mach_vm_address_t raddr;
+    mach_vm_size_t rsize;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    ULONG64 rip = RIP_sig( ucontext );
+
+    if (signal != SIGSEGV && signal != SIGBUS) return FALSE;
+    /* an instruction fetch on a protected page; macOS reports it as
+     * SEGV_ACCERR, or as BUS_ADRERR in some paths */
+    if (!siginfo || (siginfo->si_code != SEGV_ACCERR && siginfo->si_code != BUS_ADRERR)) return FALSE;
+    if ((ULONG64)siginfo->si_addr != rip &&
+        ((ULONG64)siginfo->si_addr & ~0xfffULL) != (rip & ~0xfffULL)) return FALSE;
+    raddr = rip & ~0xfffULL;
+    if (mach_vm_region( mach_task_self(), &raddr, &rsize, VM_REGION_BASIC_INFO_64,
+                        (vm_region_info_t)&info, &count, &obj ) != KERN_SUCCESS) return FALSE;
+    return (info.protection & VM_PROT_READ) && !(info.protection & VM_PROT_EXECUTE);
+}
+
 static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 {
     ucontext_t *ucontext = init_handler( sigcontext );
     EXCEPTION_RECORD rec = { 0 };
     struct xcontext context;
+
+    /* the anti-cheat preloader announces itself with an execute fault on
+     * a read-only page; patch the fingerprinted Zw stubs before its
+     * decision code can read them */
+    if (!eaac_stubs_patched && is_execute_fault_on_readable_page( signal, siginfo, ucontext ))
+    {
+        eaac_stubs_patched = TRUE;
+        patch_zw_stubs_to_windows();
+    }
+
+    /* a call into a patched stub branches to the int 0x29 fastfail the
+     * byte-exact Windows stub carries whenever wine's KUSER_SHARED_DATA
+     * SystemCall flag is set; dispatch through the stub's surviving
+     * wine tail instead (call *(0x7ffe1000) with the wine id in eax --
+     * the patched mov eax carries the Windows number, so translate it
+     * first) */
+    if (eaac_stubs_patched && (signal == SIGSEGV || signal == SIGBUS))
+    {
+        ULONG64 rip = RIP_sig( ucontext );
+        unsigned int i;
+        for (i = 0; i < ARRAY_SIZE(eaac_patched_stubs); i++)
+        {
+            if (rip != eaac_patched_stubs[i] + 0x15) continue;
+            if (*(const BYTE *)rip != 0xcd || *(const BYTE *)(rip + 1) != 0x29) break;
+            {
+                unsigned int id = wine_syscall_id_for_windows_nr( (unsigned int)RAX_sig( ucontext ) );
+                if (id && !(id & WIN_SYSCALL_KNOWN))
+                {
+                    TRACE_(seh)( "patched-stub call to %#llx: int 0x29 -> wine id %#x\n",
+                                 (unsigned long long)eaac_patched_stubs[i], id );
+                    RAX_sig( ucontext ) = id;
+                    RIP_sig( ucontext ) = eaac_patched_stubs[i] + 0x18;
+                    return;
+                }
+                break;
+            }
+        }
+    }
 
     if (tf_thread_data() && (amd64_thread_data()->tf_state & TF_CARRIER) &&
         !is_inside_syscall( RSP_sig(ucontext) )) TF_STOP("native-fault-unsupported");
@@ -3100,6 +3238,7 @@ __ASM_GLOBAL_FUNC( __restore_mxcsr_thunk,
                    "popq %rcx\n\t"
                    "jmp " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_prolog_end") );
 
+
 /**********************************************************************
  *		sigsys_handler
  *
@@ -3162,6 +3301,26 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     }
     else
     {
+        /* EAAC gate-5: stubs rewritten with Windows syscall numbers must
+         * translate back to wine ids before dispatch; the dispatcher is
+         * indexed by wine id */
+        if (is_patched_stub_address( rip ))
+        {
+            unsigned int id = wine_syscall_id_for_windows_nr( (unsigned int)RAX_sig( ucontext ) );
+            if (id && !(id & WIN_SYSCALL_KNOWN))
+            {
+                TRACE_(seh)("patched-stub syscall %#x at %p -> wine id %#x\n",
+                            (unsigned int)RAX_sig( ucontext ), (void *)rip, id);
+                RAX_sig( ucontext ) = id;
+            }
+            else
+            {
+                RAX_sig( ucontext ) = STATUS_INVALID_SYSTEM_SERVICE;
+                RCX_sig( ucontext ) = rip;
+                R11_sig( ucontext ) = EFL_sig( ucontext );
+                return;
+            }
+        }
         frame->rip = rip + 0xb;
         frame->rcx = rip;
         frame->eflags = EFL_sig( ucontext );
