@@ -1039,21 +1039,6 @@ static void preloader_exec( char **argv, const char *image_path, WORD machine )
                 }
             }
         }
-        if (compat_x87 == -1 && argv[2])
-        {
-            /* The first process of a launch, which no parent has decided for. It
-             * runs the program named by its first argument, or start.exe, which
-             * can differ from the first .exe in argv (wine start /unix game.exe
-             * runs start.exe). Nothing 64-bit needs the sidecar; otherwise ask
-             * compatdb.so, and attach unless it says no. */
-            get_first_process_target( argv[2], &target, &target_machine );
-            if (target_machine == IMAGE_FILE_MACHINE_UNKNOWN ||
-                target_machine == IMAGE_FILE_MACHINE_I386)
-            {
-                compat_x87 = query_compatdb_x87_preinit( target ) ? 1 : 0;
-                if (!compat_x87) WARN( "compatdb.so keeps the x87sidecar away from %s\n", target );
-            }
-        }
         /* Always run the sidecar in cooperative mode: it attaches via a
          * voluntary task-port handshake (performed by x87_cooperative_handshake()
          * in the re-exec'd tracee) instead of task_for_pid + ptrace, so the
