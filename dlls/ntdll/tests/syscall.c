@@ -25,32 +25,153 @@
  */
 
 #include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winternl.h"
+#include "wine/asm.h"
 #include "wine/test.h"
 
 #ifdef __x86_64__
 
+#include "../unix/win10_19045_syscalls.h"
+
 /* NtGetNlsSectionPtr on Windows 10 build 19045 (x86-64) */
 #define WIN10_19045_NtGetNlsSectionPtr 0x00fa
-/* one past the highest syscall number on Windows 10 build 19045 (x86-64) */
-#define WIN10_19045_SYSCALL_COUNT 0x01d9
-
+/* NtInitializeRegistry on Windows 10 build 19045 (x86-64) */
+#define WIN10_19045_NtInitializeRegistry 0x0101
+/* NtWaitForSingleObject on Windows 10 build 19045 (x86-64) */
+#define WIN10_19045_NtWaitForSingleObject 0x0004
+/* NtWaitLowEventPair on Windows 10 build 19045 (x86-64) - highest number in the 19045 table */
+#define WIN10_19045_NtWaitLowEventPair 0x01d8
 static NTSTATUS (WINAPI *pNtGetNlsSectionPtr)(ULONG, ULONG, void *, void **, SIZE_T *);
+static NTSTATUS (WINAPI *pNtWaitForSingleObject)(HANDLE, BOOLEAN, const LARGE_INTEGER *);
 static NTSTATUS (WINAPI *pZwSetThreadExecutionState)(EXECUTION_STATE, EXECUTION_STATE *);
+static NTSTATUS (WINAPI *pNtAccessCheck)(SECURITY_DESCRIPTOR *, HANDLE, ACCESS_MASK, GENERIC_MAPPING *,
+                                        PRIVILEGE_SET *, ULONG *, ACCESS_MASK *, NTSTATUS *);
+static NTSTATUS (WINAPI *pNtWaitLowEventPair)(HANDLE);
+
+/* Keep the caller's Windows stack arguments at rsp+0x28 through rsp+0x40. */
+extern ULONG64 WINAPI raw_access_check( SECURITY_DESCRIPTOR *, HANDLE, ACCESS_MASK, GENERIC_MAPPING *,
+                                        PRIVILEGE_SET *, ULONG *, ACCESS_MASK *, NTSTATUS * );
+__ASM_GLOBAL_FUNC( raw_access_check,
+                   __ASM_SEH(".seh_endprologue\n\t")
+                   "movq %rcx,%r10\n\t"
+                   "xorl %eax,%eax\n\t" /* NtAccessCheck is Windows syscall zero. */
+                   "syscall\n\t"
+                   "ret" );
+
+static void test_access_check_dispatch( BOOL patched )
+{
+    static const struct
+    {
+        BOOL empty_dacl;
+        NTSTATUS access_status;
+        ACCESS_MASK granted;
+    } cases[] =
+    {
+        { FALSE, STATUS_SUCCESS, KEY_QUERY_VALUE },
+        { TRUE, STATUS_ACCESS_DENIED, 0 }
+    };
+    SID_IDENTIFIER_AUTHORITY world_authority = { SECURITY_WORLD_SID_AUTHORITY };
+    GENERIC_MAPPING mapping = { KEY_READ, KEY_WRITE, KEY_EXECUTE, KEY_ALL_ACCESS };
+    SECURITY_DESCRIPTOR descriptor;
+    PRIVILEGE_SET direct_privs, raw_privs;
+    HANDLE process_token, token;
+    NTSTATUS direct, direct_access, raw_access;
+    ACCESS_MASK direct_granted, raw_granted;
+    ULONG direct_len, raw_len;
+    ULONG64 raw;
+    DWORD exception;
+    SID world;
+    ACL empty_acl;
+    unsigned int i;
+    BOOL ret;
+
+    ret = InitializeSid( &world, &world_authority, 1 );
+    ok( ret, "InitializeSid failed, error %lu\n", GetLastError() );
+    if (!ret) return;
+    world.SubAuthority[0] = SECURITY_WORLD_RID;
+    ret = InitializeSecurityDescriptor( &descriptor, SECURITY_DESCRIPTOR_REVISION );
+    ok( ret, "InitializeSecurityDescriptor failed, error %lu\n", GetLastError() );
+    if (!ret) return;
+    ret = SetSecurityDescriptorOwner( &descriptor, &world, FALSE );
+    ok( ret, "SetSecurityDescriptorOwner failed, error %lu\n", GetLastError() );
+    if (!ret) return;
+    ret = SetSecurityDescriptorGroup( &descriptor, &world, FALSE );
+    ok( ret, "SetSecurityDescriptorGroup failed, error %lu\n", GetLastError() );
+    if (!ret) return;
+    ret = InitializeAcl( &empty_acl, sizeof(empty_acl), ACL_REVISION );
+    ok( ret, "InitializeAcl failed, error %lu\n", GetLastError() );
+    if (!ret) return;
+    ret = OpenProcessToken( GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token );
+    ok( ret, "OpenProcessToken failed, error %lu\n", GetLastError() );
+    if (!ret) return;
+    ret = DuplicateToken( process_token, SecurityImpersonation, &token );
+    CloseHandle( process_token );
+    ok( ret, "DuplicateToken failed, error %lu\n", GetLastError() );
+    if (!ret) return;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++)
+    {
+        winetest_push_context( "%s, empty DACL %u", patched ? "patched" : "native/raw", cases[i].empty_dacl );
+        ret = SetSecurityDescriptorDacl( &descriptor, TRUE, cases[i].empty_dacl ? &empty_acl : NULL, FALSE );
+        ok( ret, "SetSecurityDescriptorDacl failed, error %lu\n", GetLastError() );
+        if (!ret)
+        {
+            winetest_pop_context();
+            break;
+        }
+        memset( &direct_privs, 0, sizeof(direct_privs) );
+        direct_len = sizeof(direct_privs);
+        direct = direct_access = direct_granted = 0xdeadbeef;
+        exception = 0;
+        __try
+        {
+            direct = pNtAccessCheck( &descriptor, token, KEY_QUERY_VALUE, &mapping, &direct_privs,
+                                    &direct_len, &direct_granted, &direct_access );
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            exception = GetExceptionCode();
+        }
+        ok( !exception, "NtAccessCheck raised exception %08lx\n", exception );
+        if (!exception)
+        {
+            ok( direct == STATUS_SUCCESS, "NtAccessCheck returned %08lx\n", direct );
+            ok( direct_access == cases[i].access_status && direct_granted == cases[i].granted,
+                "NtAccessCheck access %08lx, granted %08lx\n", direct_access, direct_granted );
+        }
+        if (!patched)
+        {
+            memset( &raw_privs, 0, sizeof(raw_privs) );
+            raw_len = sizeof(raw_privs);
+            raw_access = raw_granted = 0xdeadbeef;
+            raw = raw_access_check( &descriptor, token, KEY_QUERY_VALUE, &mapping, &raw_privs,
+                                    &raw_len, &raw_granted, &raw_access );
+            ok( raw == (ULONG)direct, "raw NtAccessCheck returned %s, expected %08lx\n",
+                wine_dbgstr_longlong( raw ), direct );
+            ok( raw_access == direct_access && raw_granted == direct_granted,
+                "raw NtAccessCheck access %08lx, granted %08lx; expected %08lx, %08lx\n",
+                raw_access, raw_granted, direct_access, direct_granted );
+        }
+        winetest_pop_context();
+    }
+    CloseHandle( token );
+}
 
 /* Execute a syscall instruction directly, with the register and stack
  * state the Windows kernel expects at the instruction:
  *   rax = syscall number, r10 = 1st argument, rdx = 2nd, r8 = 3rd,
  *   r9 = 4th, [rsp+0x28] = 5th. */
-static NTSTATUS raw_syscall( unsigned int nr, ULONG_PTR arg1, ULONG_PTR arg2,
-                             ULONG_PTR arg3, ULONG_PTR arg4, ULONG_PTR arg5 )
+static ULONG64 raw_syscall( unsigned int nr, ULONG_PTR arg1, ULONG_PTR arg2,
+                            ULONG_PTR arg3, ULONG_PTR arg4, ULONG_PTR arg5 )
 {
-    NTSTATUS status;
+    ULONG64 status;
     __asm__( "movq %2, %%rcx\n\t"
              "movq %3, %%rdx\n\t"
              "movq %4, %%r8\n\t"
@@ -81,6 +202,45 @@ static void test_raw_syscall_dispatch( void )
     raw = raw_syscall( WIN10_19045_NtGetNlsSectionPtr, 0xdeadbeef, 0, 0, 0, 0 );
     ok( raw == direct, "raw syscall %#x returned %08lx, expected %08lx (stub result)\n",
         WIN10_19045_NtGetNlsSectionPtr, raw, direct );
+}
+
+static void test_raw_syscall_wait( void )
+{
+    LARGE_INTEGER zero_timeout;
+    HANDLE invalid_handle = (HANDLE)(ULONG_PTR)0xffffffffffffd8f0ULL;
+    const LARGE_INTEGER *invalid_timeout = (const LARGE_INTEGER *)(ULONG_PTR)0xffffffffffffd8f0ULL;
+    HANDLE event;
+    NTSTATUS direct, raw;
+
+    zero_timeout.QuadPart = 0;
+
+    /* Match the waits used by the EA anti-cheat loader. */
+    direct = pNtWaitForSingleObject( GetCurrentProcess(), FALSE, &zero_timeout );
+    ok( direct == STATUS_TIMEOUT, "NtWaitForSingleObject(process) returned %08lx\n", direct );
+    raw = raw_syscall( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)GetCurrentProcess(), FALSE,
+                       (ULONG_PTR)&zero_timeout, 0, 0 );
+    ok( raw == direct, "raw NtWaitForSingleObject(process) returned %08lx, expected %08lx\n", raw, direct );
+
+    direct = pNtWaitForSingleObject( GetCurrentProcess(), FALSE, invalid_timeout );
+    ok( direct == STATUS_ACCESS_VIOLATION, "NtWaitForSingleObject(invalid timeout) returned %08lx\n", direct );
+    raw = raw_syscall( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)GetCurrentProcess(), FALSE,
+                       (ULONG_PTR)invalid_timeout, 0, 0 );
+    ok( raw == direct, "raw NtWaitForSingleObject(invalid timeout) returned %08lx, expected %08lx\n", raw, direct );
+
+    direct = pNtWaitForSingleObject( invalid_handle, FALSE, NULL );
+    ok( direct == STATUS_INVALID_HANDLE, "NtWaitForSingleObject(invalid handle) returned %08lx\n", direct );
+    raw = raw_syscall( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)invalid_handle, FALSE, 0, 0, 0 );
+    ok( raw == direct, "raw NtWaitForSingleObject(invalid handle) returned %08lx, expected %08lx\n", raw, direct );
+
+    event = CreateEventW( NULL, TRUE, TRUE, NULL );
+    ok( event != NULL, "CreateEventW failed, error %lu\n", GetLastError() );
+    if (!event) return;
+    direct = pNtWaitForSingleObject( event, FALSE, &zero_timeout );
+    ok( direct == STATUS_SUCCESS, "NtWaitForSingleObject(signaled event) returned %08lx\n", direct );
+    raw = raw_syscall( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)event, FALSE,
+                       (ULONG_PTR)&zero_timeout, 0, 0 );
+    ok( raw == direct, "raw NtWaitForSingleObject(signaled event) returned %08lx, expected %08lx\n", raw, direct );
+    CloseHandle( event );
 }
 
 /* Execute a syscall instruction directly with distinctive flags set, and
@@ -162,17 +322,38 @@ static void test_raw_syscall_register_semantics( void )
 
 static void test_raw_syscall_invalid_number( void )
 {
-    NTSTATUS raw;
+    ULONG64 raw;
 
     /* A number outside the Windows syscall table must fail the way the
      * Windows kernel fails an unknown syscall, and execution must resume
      * at the instruction after the syscall instruction. */
     raw = raw_syscall( WIN10_19045_SYSCALL_COUNT, 0xdeadbeef, 0, 0, 0, 0 );
-    ok( raw == STATUS_INVALID_SYSTEM_SERVICE, "unknown syscall returned %08lx\n", raw );
+    ok( raw == (ULONG)STATUS_INVALID_SYSTEM_SERVICE, "unknown syscall returned %s\n",
+        wine_dbgstr_longlong( raw ) );
 }
 
-/* the six ntdll Zw stubs the EA anti-cheat (Javelin) loader hashes; the
- * syscall numbers they carry on Windows 10 build 19045 (x86-64) */
+static void test_raw_syscall_registry_invalid_condition( void )
+{
+    static const ULONG_PTR invalid_conditions[] =
+    {
+        3, 0xfff, 0x13e9, 0xffff,
+        0xffffffffffffd8f0ULL, 0x123456780000d8f0ULL
+    };
+    ULONG64 raw;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(invalid_conditions); i++)
+    {
+        raw = raw_syscall( WIN10_19045_NtInitializeRegistry, invalid_conditions[i], 0, 0, 0, 0 );
+        ok( raw == (ULONG)STATUS_INVALID_PARAMETER,
+            "raw NtInitializeRegistry(%s) returned %s, expected zero-extended STATUS_INVALID_PARAMETER\n",
+            wine_dbgstr_longlong( invalid_conditions[i] ), wine_dbgstr_longlong( raw ) );
+    }
+}
+
+/* the six ntdll Zw stubs the EA anti-cheat (Javelin) loader hashes in
+ * its first verification round, plus two it resolves in later rounds;
+ * the syscall numbers they carry on Windows 10 build 19045 (x86-64) */
 static const struct { const char *name; unsigned int nr; } eaac_zw_stubs[] =
 {
     { "ZwSetInformationKey",           0x19a },
@@ -181,11 +362,31 @@ static const struct { const char *name; unsigned int nr; } eaac_zw_stubs[] =
     { "ZwSetIntervalProfile",          0x1a2 },
     { "ZwSetSystemTime",               0x1ae },
     { "ZwSetThreadExecutionState",     0x1af },
+    { "ZwTraceEvent",                 0x5e },
+    { "ZwUnloadDriver",               0x1c8 },
 };
+
+/* Format 32 bytes as hex string for diagnostics */
+static void format_32_bytes_hex( const BYTE *bytes, char *buf, size_t bufsize )
+{
+    unsigned int i;
+    size_t pos = 0;
+    for (i = 0; i < 32 && pos + 3 < bufsize; i++)
+    {
+        pos += snprintf( buf + pos, bufsize - pos, "%02x ", bytes[i] );
+    }
+    if (pos < bufsize)
+        buf[pos] = '\0';
+}
+
+/* Expected count of patched Zw stubs from the unix patcher (signal_x86_64.c TRACE).
+ * Update this value deliberately when the stub set changes.
+ * Current value from: TRACE "patched 257 Zw stubs to Windows 19045 bytes" */
+#define EAAC_EXPECTED_PATCHED_STUBS 257
 
 static void test_zw_stub_windows_bytes( void )
 {
-    static const BYTE win10_stub[23] =
+    static const BYTE win10_stub[32] =
     {
         0x4c,0x8b,0xd1,                    /* mov r10,rcx */
         0xb8,0,0,0,0,                      /* mov eax,<nr> */
@@ -193,8 +394,9 @@ static void test_zw_stub_windows_bytes( void )
         0x75,0x03,                         /* jne +3 */
         0x0f,0x05,                         /* syscall */
         0xc3,                              /* ret */
-        0xcd,0x29,                         /* int 0x29 */
-        0xc3                               /* ret */
+        0xcd,0x2e,                         /* int 0x2e */
+        0xc3,                              /* ret */
+        0x0f,0x1f,0x84,0,0,0,0,0           /* eight-byte NOP */
     };
     HMODULE ntdll = GetModuleHandleW( L"ntdll.dll" );
     BYTE expect[sizeof(win10_stub)];
@@ -202,6 +404,7 @@ static void test_zw_stub_windows_bytes( void )
     unsigned int i;
     DWORD old_prot;
     EXECUTION_STATE old;
+    unsigned int resolved = 0, patched = 0;
 
     /* reference call through the unpatched wine stub */
     ok( pZwSetThreadExecutionState( ES_CONTINUOUS, &old ) == STATUS_SUCCESS,
@@ -229,12 +432,135 @@ static void test_zw_stub_windows_bytes( void )
             eaac_zw_stubs[i].name, eaac_zw_stubs[i].nr );
     }
 
+    for (i = 0; i < ARRAY_SIZE(windows_syscalls_WIN10_19045); i++)
+    {
+        const struct windows_syscall *syscall = &windows_syscalls_WIN10_19045[i];
+        const BYTE *stub = (const BYTE *)GetProcAddress( ntdll, syscall->name );
+
+        if (!stub || memcmp( stub, win10_stub, 4 )) continue;
+        resolved++;
+        memcpy( expect, win10_stub, sizeof(expect) );
+        *(DWORD *)(expect + 4) = syscall->nr;
+        if (memcmp( stub, expect, sizeof(expect) ) == 0)
+            patched++;
+        ok( memcmp( stub, expect, sizeof(expect) ) == 0,
+            "%s does not hold the Windows 10 19045 stub (nr %x)\n", syscall->name, syscall->nr );
+    }
+    ok( patched == resolved, "%u of %u resolved Nt syscall stubs hold the Windows 10 19045 bytes\n",
+        patched, resolved );
+    ok( resolved == EAAC_EXPECTED_PATCHED_STUBS, "resolved count %u, expected %u patched stubs\n",
+        resolved, EAAC_EXPECTED_PATCHED_STUBS );
+    trace( "patched %u / resolved %u Zw stubs to Windows 10 19045 bytes\n", patched, resolved );
+
     /* a call through a patched stub must still dispatch to the wine
      * implementation: STATUS_SUCCESS and the state set by the reference
      * call (ES_CONTINUOUS) reported as the previous state */
     ok( pZwSetThreadExecutionState( ES_CONTINUOUS, &old ) == STATUS_SUCCESS
         && old == ES_CONTINUOUS,
-        "patched ZwSetThreadExecutionState returned old state %08x\n", old );
+        "patched ZwSetThreadExecutionState returned old state %08lx\n", old );
+}
+
+static void test_zw_stub_independent_golden( void )
+{
+    /* Microsoft ntdll 19041.5794 x64 reference ZwClose cell, corroborated against
+     * 19041.5440 and 19041.6093; deliberately NOT derived from the implementation's
+     * template (win10_stub) or syscall table (windows_syscalls_WIN10_19045) */
+    static const BYTE golden_zw_close[32] =
+    {
+        0x4c,0x8b,0xd1,                    /* mov r10,rcx */
+        0xb8,0x0f,0x00,0x00,0x00,          /* mov eax,0x0f (NtClose) */
+        0xf6,0x04,0x25,0x08,0x03,0xfe,0x7f,0x01,  /* test byte [0x7ffe0308],1 */
+        0x75,0x03,                         /* jne +3 */
+        0x0f,0x05,                         /* syscall */
+        0xc3,                              /* ret */
+        0xcd,0x2e,                         /* int 0x2e */
+        0xc3,                              /* ret */
+        0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00  /* eight-byte NOP */
+    };
+    HMODULE ntdll = GetModuleHandleW( L"ntdll.dll" );
+    const BYTE *stub_zw = (const BYTE *)GetProcAddress( ntdll, "ZwClose" );
+    const BYTE *stub_nt = (const BYTE *)GetProcAddress( ntdll, "NtClose" );
+    char actual_hex[256];
+
+    ok( stub_zw != NULL, "ZwClose not found\n" );
+    if (stub_zw)
+    {
+        if (memcmp( stub_zw, golden_zw_close, 32 ) != 0)
+        {
+            format_32_bytes_hex( stub_zw, actual_hex, sizeof(actual_hex) );
+            ok( 0, "ZwClose stub does not match golden bytes. Actual: %s\n", actual_hex );
+        }
+        ok( stub_zw[4] == 0x0f, "ZwClose syscall number at [4] should be 0x0f\n" );
+    }
+
+    ok( stub_nt != NULL, "NtClose not found\n" );
+    if (stub_nt)
+    {
+        if (memcmp( stub_nt, golden_zw_close, 32 ) != 0)
+        {
+            format_32_bytes_hex( stub_nt, actual_hex, sizeof(actual_hex) );
+            ok( 0, "NtClose stub does not match golden bytes. Actual: %s\n", actual_hex );
+        }
+        ok( stub_nt[4] == 0x0f, "NtClose syscall number at [4] should be 0x0f\n" );
+    }
+}
+
+static void test_raw_syscall_registry_flag_boundaries( void )
+{
+    static const struct { ULONG_PTR flag; NTSTATUS expect; } tests[] =
+    {
+        { 0x1000, STATUS_ACCESS_DENIED },     /* lowest accepted flag */
+        { 0x13e8, STATUS_ACCESS_DENIED },     /* highest accepted flag */
+        { 0x13e9, STATUS_INVALID_PARAMETER }, /* first rejected flag above the range */
+    };
+    ULONG64 raw;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        raw = raw_syscall( WIN10_19045_NtInitializeRegistry, tests[i].flag, 0, 0, 0, 0 );
+        /* Real Windows returns STATUS_ACCESS_DENIED post-boot for accepted
+         * flags; the emulation still answers STATUS_NOT_IMPLEMENTED (review
+         * finding C4, deliberately not implemented - see the handoff's
+         * evasion-disclosure section). Track the gap as todo instead of
+         * failing the suite or pinning the non-Windows status. */
+        todo_wine_if( tests[i].expect == STATUS_ACCESS_DENIED )
+        ok( raw == (ULONG)tests[i].expect,
+            "raw NtInitializeRegistry(%#Ix) returned %s, expected %#lx\n",
+            tests[i].flag, wine_dbgstr_longlong( raw ), (ULONG)tests[i].expect );
+    }
+}
+
+static void test_raw_syscall_number_boundaries( void )
+{
+    ULONG64 raw;
+    NTSTATUS direct;
+    HANDLE invalid_handle = (HANDLE)(ULONG_PTR)0xdeadbeef;
+
+    /* Max valid syscall number: NtWaitLowEventPair (0x1d8).
+     * It is inside the table and must not be rejected as unknown. */
+    raw = raw_syscall( WIN10_19045_NtWaitLowEventPair, (ULONG_PTR)invalid_handle, 0, 0, 0, 0 );
+    ok( raw != (ULONG)STATUS_INVALID_SYSTEM_SERVICE,
+        "raw NtWaitLowEventPair with invalid handle returned STATUS_INVALID_SYSTEM_SERVICE\n" );
+
+    /* If the export exists, compare raw dispatch with direct call. */
+    if (pNtWaitLowEventPair)
+    {
+        direct = pNtWaitLowEventPair( invalid_handle );
+        ok( raw == (ULONG)direct,
+            "raw NtWaitLowEventPair returned %s, expected %#lx (direct call result)\n",
+            wine_dbgstr_longlong( raw ), (ULONG)direct );
+    }
+    else
+    {
+        trace( "NtWaitLowEventPair export not available in ntdll\n" );
+    }
+
+    /* A number way outside the table must fail with STATUS_INVALID_SYSTEM_SERVICE. */
+    raw = raw_syscall( 0xffffffff, (ULONG_PTR)invalid_handle, 0, 0, 0, 0 );
+    ok( raw == (ULONG)STATUS_INVALID_SYSTEM_SERVICE,
+        "raw syscall with number 0xffffffff returned %s, expected STATUS_INVALID_SYSTEM_SERVICE\n",
+        wine_dbgstr_longlong( raw ) );
 }
 
 static void init_function_pointers( void )
@@ -243,8 +569,41 @@ static void init_function_pointers( void )
 
     pNtGetNlsSectionPtr = (void *)GetProcAddress( ntdll, "NtGetNlsSectionPtr" );
     ok( pNtGetNlsSectionPtr != NULL, "NtGetNlsSectionPtr not found\n" );
+    pNtWaitForSingleObject = (void *)GetProcAddress( ntdll, "NtWaitForSingleObject" );
+    ok( pNtWaitForSingleObject != NULL, "NtWaitForSingleObject not found\n" );
     pZwSetThreadExecutionState = (void *)GetProcAddress( ntdll, "ZwSetThreadExecutionState" );
     ok( pZwSetThreadExecutionState != NULL, "ZwSetThreadExecutionState not found\n" );
+    pNtAccessCheck = (void *)GetProcAddress( ntdll, "NtAccessCheck" );
+    ok( pNtAccessCheck != NULL, "NtAccessCheck not found\n" );
+    pNtWaitLowEventPair = (void *)GetProcAddress( ntdll, "NtWaitLowEventPair" );
+    /* NtWaitLowEventPair is optional; the test will handle its absence */
+}
+
+static BOOL is_wine_19045_macos( void )
+{
+    RTL_OSVERSIONINFOEXW ver = { sizeof(ver) };
+    const char *(CDECL *pwine_get_host_version)( const char **sysname, const char **release );
+    const char *sysname = NULL;
+
+    if (strcmp( winetest_platform, "wine" ))
+    {
+        skip( "EAAC syscall emulation tests are Wine-specific (platform %s)\n", winetest_platform );
+        return FALSE;
+    }
+    if (RtlGetVersion( &ver ) || ver.dwBuildNumber != 19045)
+    {
+        skip( "EAAC syscall emulation targets Windows build 19045, prefix reports %lu\n", ver.dwBuildNumber );
+        return FALSE;
+    }
+    pwine_get_host_version = (void *)GetProcAddress( GetModuleHandleA( "ntdll.dll" ), "wine_get_host_version" );
+    if (!pwine_get_host_version) { skip( "wine_get_host_version not available\n" ); return FALSE; }
+    pwine_get_host_version( &sysname, NULL );
+    if (!sysname || strcmp( sysname, "Darwin" ))
+    {
+        skip( "raw syscall emulation is macOS-only (host %s)\n", sysname ? sysname : "(null)" );
+        return FALSE;
+    }
+    return TRUE;
 }
 
 #endif /* __x86_64__ */
@@ -252,11 +611,19 @@ static void init_function_pointers( void )
 START_TEST(syscall)
 {
 #ifdef __x86_64__
+    if (!is_wine_19045_macos()) return;
     init_function_pointers();
-    if (!pNtGetNlsSectionPtr || !pZwSetThreadExecutionState) return;
+    if (!pNtGetNlsSectionPtr || !pNtWaitForSingleObject || !pZwSetThreadExecutionState || !pNtAccessCheck) return;
+    test_access_check_dispatch( FALSE );
     test_raw_syscall_dispatch();
+    test_raw_syscall_wait();
     test_raw_syscall_invalid_number();
+    test_raw_syscall_registry_invalid_condition();
+    test_raw_syscall_registry_flag_boundaries();
+    test_raw_syscall_number_boundaries();
     test_raw_syscall_register_semantics();
     test_zw_stub_windows_bytes();
+    test_zw_stub_independent_golden();
+    test_access_check_dispatch( TRUE );
 #endif
 }

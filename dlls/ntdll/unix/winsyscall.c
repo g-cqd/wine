@@ -40,6 +40,7 @@
 #include "winbase.h"
 #include "winternl.h"
 #include "unix_private.h"
+#include "wine/asm.h"
 #include "wine/debug.h"
 
 #ifdef __x86_64__
@@ -151,14 +152,14 @@ static const BYTE *find_wine_syscall_stub( const char *name )
     return NULL;
 }
 
-/* return the wine syscall id for the ntdll stub exporting name, or 0 if
- * ntdll does not export such a syscall stub.  The id is the 0-based
- * index the stub loads into eax: the dispatcher receives it unchanged
- * from wine's own stubs. */
-static unsigned int get_wine_syscall_id( const char *name )
+/* Return whether name exports a syscall stub, including the valid id zero.
+ * The id is the zero-based index loaded into eax by the wine stub. */
+static BOOL get_wine_syscall_id( const char *name, unsigned int *id )
 {
     const BYTE *stub = find_wine_syscall_stub( name );
-    return stub ? *(const unsigned int *)(stub + 4) : 0;
+    if (!stub) return FALSE;
+    *id = *(const unsigned int *)(stub + 4);
+    return TRUE;
 }
 
 /* return the address of the wine ntdll syscall stub exporting name, or
@@ -192,18 +193,23 @@ static void load_windows_syscall_cache( void )
     }
     else TRACE( "ntdll image not found\n" );
     {
-        unsigned int id = get_wine_syscall_id( "NtGetNlsSectionPtr" );
-        if (id) TRACE( "service table entry %#x = %p, NtGetNlsSectionPtr at %p\n",
-                       id, (void *)KeServiceDescriptorTable[0].ServiceTable[id],
-                       (void *)&NtGetNlsSectionPtr );
+        unsigned int id;
+        if (get_wine_syscall_id( "NtGetNlsSectionPtr", &id ))
+            TRACE( "service table entry %#x = %p, NtGetNlsSectionPtr at %p\n",
+                   id, (void *)KeServiceDescriptorTable[0].ServiceTable[id],
+                   (void *)&NtGetNlsSectionPtr );
     }
     for (i = 0; i < ARRAY_SIZE( windows_syscalls_WIN10_19045 ); i++)
     {
         unsigned int nr = windows_syscalls_WIN10_19045[i].nr;
-        unsigned int id = get_wine_syscall_id( windows_syscalls_WIN10_19045[i].name );
+        unsigned int id;
 
-        win_nr_to_id[nr] = id ? id : WIN_SYSCALL_KNOWN;
-        if (id) resolved++;
+        if (get_wine_syscall_id( windows_syscalls_WIN10_19045[i].name, &id ))
+        {
+            win_nr_to_id[nr] = id + 1;
+            resolved++;
+        }
+        else win_nr_to_id[nr] = WIN_SYSCALL_KNOWN;
     }
     TRACE( "%u of %u Windows syscalls resolved to wine stubs\n",
            resolved, (unsigned int)ARRAY_SIZE( windows_syscalls_WIN10_19045 ) );
@@ -219,15 +225,143 @@ void init_windows_syscall_cache( void *base, unsigned int size )
     load_windows_syscall_cache();
 }
 
-/* map a Windows 10 19045 syscall number to the wine syscall id of the
- * matching ntdll stub, with WIN_SYSCALL_KNOWN set if the number exists on
- * Windows but wine has no stub for it; 0 for numbers that are not Windows
- * syscalls at all */
+/* Map a Windows 10 19045 number to the wine syscall id plus one, preserving
+ * id zero. WIN_SYSCALL_KNOWN means Windows defines it but wine has no stub;
+ * zero means Windows does not define the number. */
 unsigned int wine_syscall_id_for_windows_nr( unsigned int nr )
 {
     if (nr >= ARRAY_SIZE( win_nr_to_id )) return 0;
     if (!nr_cache_loaded) load_windows_syscall_cache();
     return win_nr_to_id[nr];
+}
+
+
+/* the addresses of the Zw stubs rewritten by eaac_patch_windows_zw_stubs;
+ * the signal handlers check them to recognize calls through a rewritten
+ * stub and translate its Windows number back to the wine id */
+static ULONG64 eaac_patched_stubs[WIN10_19045_SYSCALL_COUNT];
+static unsigned int eaac_patched_count;
+
+C_ASSERT( offsetof( struct windows_syscall, nr ) == 0 );
+C_ASSERT( offsetof( struct windows_syscall, name ) == 8 );
+C_ASSERT( sizeof( struct windows_syscall ) == 16 );
+C_ASSERT( ARRAY_SIZE( windows_syscalls_WIN10_19045 ) == WIN10_19045_SYSCALL_COUNT );
+C_ASSERT( ARRAY_SIZE( eaac_patched_stubs ) >= ARRAY_SIZE( windows_syscalls_WIN10_19045 ) );
+
+/* The caller supplies at least count storage slots. Publish the number of
+ * successful writes only after scanning all count entries. The loop itself
+ * is O(count), excluding the two callbacks' work. */
+extern unsigned int eaac_patch_stubs_native( const struct windows_syscall *table, unsigned int count,
+                                              const BYTE *(*find_stub)( const char * ),
+                                              BOOL (*write_stub)( BYTE *, unsigned int ),
+                                              ULONG64 *storage, unsigned int *published_count );
+__ASM_GLOBAL_FUNC( eaac_patch_stubs_native,
+                   "pushq %rbx\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset 8\n\t")
+                   __ASM_CFI(".cfi_offset %rbx,-16\n\t")
+                   "pushq %rbp\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset 8\n\t")
+                   __ASM_CFI(".cfi_offset %rbp,-24\n\t")
+                   "pushq %r12\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset 8\n\t")
+                   __ASM_CFI(".cfi_offset %r12,-32\n\t")
+                   "pushq %r13\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset 8\n\t")
+                   __ASM_CFI(".cfi_offset %r13,-40\n\t")
+                   "pushq %r14\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset 8\n\t")
+                   __ASM_CFI(".cfi_offset %r14,-48\n\t")
+                   "pushq %r15\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset 8\n\t")
+                   __ASM_CFI(".cfi_offset %r15,-56\n\t")
+                   "subq $24,%rsp\n\t" /* align the stack before callbacks */
+                   __ASM_CFI(".cfi_adjust_cfa_offset 24\n\t")
+                   "movq %rdi,%r12\n\t"
+                   "movl %esi,%r13d\n\t"
+                   "movq %rdx,%r14\n\t"
+                   "movq %rcx,%r15\n\t"
+                   "movq %r8,%rbx\n\t"
+                   "movq %r9,%rbp\n\t"
+                   "movl $0,(%rsp)\n\t"  /* table index */
+                   "movl $0,8(%rsp)\n\t" /* successful writes */
+                   "1: cmpl %r13d,(%rsp)\n\t"
+                   "jae 3f\n\t"
+                   "movq 8(%r12),%rdi\n\t"
+                   "call *%r14\n\t"
+                   "testq %rax,%rax\n\t"
+                   "jz 2f\n\t"
+                   "movq %rax,16(%rsp)\n\t"
+                   "movq %rax,%rdi\n\t"
+                   "movl (%r12),%esi\n\t"
+                   "call *%r15\n\t"
+                   "testl %eax,%eax\n\t"
+                   "jz 2f\n\t"
+                   "movl 8(%rsp),%eax\n\t"
+                   "movq 16(%rsp),%rdx\n\t"
+                   "movq %rdx,(%rbx,%rax,8)\n\t"
+                   "incl 8(%rsp)\n\t"
+                   "2: addq $16,%r12\n\t"
+                   "incl (%rsp)\n\t"
+                   "jmp 1b\n\t"
+                   "3: movl 8(%rsp),%eax\n\t"
+                   "movl %eax,(%rbp)\n\t"
+                   "addq $24,%rsp\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset -24\n\t")
+                   "popq %r15\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
+                   __ASM_CFI(".cfi_restore %r15\n\t")
+                   "popq %r14\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
+                   __ASM_CFI(".cfi_restore %r14\n\t")
+                   "popq %r13\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
+                   __ASM_CFI(".cfi_restore %r13\n\t")
+                   "popq %r12\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
+                   __ASM_CFI(".cfi_restore %r12\n\t")
+                   "popq %rbp\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
+                   __ASM_CFI(".cfi_restore %rbp\n\t")
+                   "popq %rbx\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
+                   __ASM_CFI(".cfi_restore %rbx\n\t")
+                   "ret" );
+
+/* Find one exact address among count successfully patched stubs in O(count). */
+extern BOOL eaac_is_patched_stub_native( ULONG64 addr, const ULONG64 *storage, unsigned int count );
+__ASM_GLOBAL_FUNC( eaac_is_patched_stub_native,
+                   "xorl %eax,%eax\n\t"
+                   "testl %edx,%edx\n\t"
+                   "jz 2f\n\t"
+                   "1: cmpq %rdi,(%rsi,%rax,8)\n\t"
+                   "je 3f\n\t"
+                   "incl %eax\n\t"
+                   "cmpl %edx,%eax\n\t"
+                   "jb 1b\n\t"
+                   "xorl %eax,%eax\n\t"
+                   "2: ret\n\t"
+                   "3: movl $1,%eax\n\t"
+                   "ret" );
+
+/* rewrite every wine ntdll syscall stub that has a known Windows 10 19045
+ * syscall number with the caller-provided stub image (write_stub stores
+ * the exact Windows 19045 stub for nr at addr and reports success).  The EA anti-cheat
+ * loader fingerprints these stubs, choosing different names on every
+ * verification round, so all resolvable stubs must be rewritten.  Returns
+ * how many stubs were rewritten. */
+unsigned int eaac_patch_windows_zw_stubs( BOOL (*write_stub)( BYTE *addr, unsigned int nr ) )
+{
+    if (!nr_cache_loaded) load_windows_syscall_cache();
+    return eaac_patch_stubs_native( windows_syscalls_WIN10_19045,
+                                    ARRAY_SIZE( windows_syscalls_WIN10_19045 ),
+                                    find_wine_syscall_stub, write_stub,
+                                    eaac_patched_stubs, &eaac_patched_count );
+}
+
+/* is addr a Zw stub rewritten by eaac_patch_windows_zw_stubs? */
+BOOL is_patched_stub_address( ULONG64 addr )
+{
+    return eaac_is_patched_stub_native( addr, eaac_patched_stubs, eaac_patched_count );
 }
 
 #endif /* __x86_64__ */

@@ -36,6 +36,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <time.h>
+#include <sched.h>
 #ifdef HAVE_MACHINE_SYSARCH_H
 # include <machine/sysarch.h>
 #endif
@@ -2770,75 +2771,56 @@ static inline BOOL check_invalid_gsbase( ucontext_t *ucontext )
  */
 /* EA anti-cheat (Javelin) compatibility: between its self-decrypt dance
  * (a deliberate execute fault on a read-only page of its preloader image)
- * and its raw syscall probe, the loader reads and hashes six ntdll Zw
- * stubs.  Wine's stubs have the same shape but differ in the syscall
- * number and the tail, so the hash fails and the launcher aborts with
- * E111000D ("Conflicting software detected!").  At the dance, rewrite
- * the six stubs with the byte-exact Windows 10 19045 stubs.  Calls
- * through the patched stubs keep working: they raise SIGSYS like wine's
- * own stubs, and the sigsys wine-stub path translates the Windows
- * number back to the wine id (is_patched_stub_address below). */
-static const struct { const char *name; ULONG nr; } eaac_zw_stubs[] =
-{
-    { "ZwSetInformationKey",           0x19a },
-    { "ZwSetInformationToken",         0x19d },
-    { "ZwSetInformationVirtualMemory", 0x1a0 },
-    { "ZwSetIntervalProfile",          0x1a2 },
-    { "ZwSetSystemTime",               0x1ae },
-    { "ZwSetThreadExecutionState",     0x1af },
-};
-static ULONG64 eaac_patched_stubs[ARRAY_SIZE(eaac_zw_stubs)];
-static BOOL eaac_stubs_patched;
+ * and its raw syscall probe, the loader resolves ntdll Zw stubs by name
+ * and reads and hashes their bytes -- choosing different names on every
+ * verification round, and running further rounds long after the first
+ * probe.  Wine's stubs have the same shape but differ in the syscall
+ * number and the tail, so the hash fails and the process aborts with
+ * E111000D ("Conflicting software detected!"), reported through a modal
+ * dialog that blocks the launch.  At the dance, rewrite every resolvable
+ * Zw stub with the byte-exact Windows 10 19045 stub (see
+ * eaac_patch_windows_zw_stubs).  Calls through the rewritten stubs keep
+ * working: with the KUSER_SHARED_DATA SystemCall flag set they branch
+ * to the int 0x2e instruction the Windows stub carries, and the segv
+ * handler dispatches through the syscall frame with the
+ * Windows number translated to the wine id; with the flag clear the
+ * stub's syscall raises SIGSYS and the sigsys wine-stub path applies
+ * the same translation. */
+static volatile BOOL eaac_stubs_patched;
+static volatile BOOL eaac_patch_done;
+static unsigned int eaac_xlat_fail_logged;
 
-static BOOL is_patched_stub_address( ULONG64 addr )
-{
-    unsigned int i;
-    for (i = 0; i < ARRAY_SIZE(eaac_patched_stubs); i++)
-        if (eaac_patched_stubs[i] == addr) return TRUE;
-    return FALSE;
-}
+/* Write the canonical 32-byte Windows stub image without an intermediate buffer.
+ * The first eight bytes contain the caller's syscall number. */
+extern void write_windows_stub_image( BYTE *addr, unsigned int nr );
+__ASM_GLOBAL_FUNC( write_windows_stub_image,
+                   "movl $0xb8d18b4c,(%rdi)\n\t"
+                   "movl %esi,4(%rdi)\n\t"
+                   "movabsq $0x017ffe03082504f6,%rax\n\t"
+                   "movq %rax,8(%rdi)\n\t"
+                   "movabsq $0xc32ecdc3050f0375,%rax\n\t"
+                   "movq %rax,16(%rdi)\n\t"
+                   "movabsq $0x0000000000841f0f,%rax\n\t"
+                   "movq %rax,24(%rdi)\n\t"
+                   "ret" );
 
-static void patch_zw_stubs_to_windows(void)
+/* Make the target pages writable, write the full stub cell, and restore RX. */
+static BOOL write_windows_stub( BYTE *addr, unsigned int nr )
 {
-    static const BYTE win10_stub[23] = {
-        0x4c,0x8b,0xd1,                    /* mov r10,rcx */
-        0xb8,0,0,0,0,                       /* mov eax,<nr> */
-        0xf6,0x04,0x25,0x08,0x03,0xfe,0x7f,0x01,  /* test byte [0x7ffe0308],1 */
-        0x75,0x03,                          /* jne +3 */
-        0x0f,0x05,                          /* syscall */
-        0xc3,                               /* ret */
-        0xcd,0x29,                          /* int 0x29 */
-        0xc3                                /* ret */
-    };
-    static const BYTE stub_prefix[] = { 0x4c, 0x8b, 0xd1, 0xb8 };
-    unsigned int i;
+    ULONG64 first, last;
 
-    for (i = 0; i < ARRAY_SIZE(eaac_zw_stubs); i++)
+    /* the ntdll code pages are r-x; flip to write, patch, restore */
+    first = (ULONG64)addr & ~0xfff;
+    last = ((ULONG64)addr + 31) & ~0xfff;
+    if (mprotect( (void *)first, last - first + 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC ))
     {
-        /* resolve the stub by name so a rebuilt ntdll cannot shift it */
-        BYTE *addr = (BYTE *)get_wine_syscall_stub_address( eaac_zw_stubs[i].name );
-        BYTE buf[23];
-        ULONG64 first, last;
-        memcpy( buf, win10_stub, sizeof(buf) );
-        *(ULONG *)(buf + 4) = eaac_zw_stubs[i].nr;
-        if (!addr || memcmp( addr, stub_prefix, sizeof(stub_prefix) ))
-        {
-            TRACE_(seh)( "stub patch: %s not resolved to a wine syscall stub\n", eaac_zw_stubs[i].name );
-            continue;
-        }
-        /* the ntdll code pages are r-x; flip to write, patch, restore */
-        first = (ULONG64)addr & ~0xfff;
-        last = ((ULONG64)addr + sizeof(buf) - 1) & ~0xfff;
-        if (mprotect( (void *)first, last - first + 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC ))
-        {
-            TRACE_(seh)( "stub patch: mprotect failed at %p\n", addr );
-            continue;
-        }
-        memcpy( addr, buf, sizeof(buf) );
-        mprotect( (void *)first, last - first + 0x1000, PROT_READ | PROT_EXEC );
-        eaac_patched_stubs[i] = (ULONG64)addr;
+        TRACE_(seh)( "stub patch: mprotect failed at %p\n", addr );
+        return FALSE;
     }
-    TRACE_(seh)( "patched %u Zw stubs to Windows 19045 bytes\n", (unsigned int)ARRAY_SIZE(eaac_zw_stubs) );
+    write_windows_stub_image( addr, nr );
+    if (mprotect( (void *)first, last - first + 0x1000, PROT_READ | PROT_EXEC ))
+        TRACE_(seh)( "stub patch: restore mprotect failed at %p\n", addr );
+    return TRUE;
 }
 
 /* the preloader's self-decrypt dance: an execute fault on a page that is
@@ -2848,6 +2830,7 @@ static void patch_zw_stubs_to_windows(void)
 static BOOL is_execute_fault_on_readable_page( int signal, siginfo_t *siginfo,
                                                ucontext_t *ucontext )
 {
+#ifdef __APPLE__
     mach_vm_address_t raddr;
     mach_vm_size_t rsize;
     vm_region_basic_info_data_64_t info;
@@ -2865,6 +2848,26 @@ static BOOL is_execute_fault_on_readable_page( int signal, siginfo_t *siginfo,
     if (mach_vm_region( mach_task_self(), &raddr, &rsize, VM_REGION_BASIC_INFO_64,
                         (vm_region_info_t)&info, &count, &obj ) != KERN_SUCCESS) return FALSE;
     return (info.protection & VM_PROT_READ) && !(info.protection & VM_PROT_EXECUTE);
+#else
+    return FALSE;
+#endif
+}
+
+static void trace_patched_stub_termination( ucontext_t *ucontext, const char *instruction )
+{
+    ULONG64 caller = 0;
+    SIZE_T bytes;
+
+    /* NtTerminateProcess is Windows 10 19045 syscall 0x2c. Read the guest
+     * return address only for this diagnostic, with page permissions checked. */
+    if (!TRACE_ON(seh) || (unsigned int)RAX_sig(ucontext) != 0x2c) return;
+    bytes = virtual_uninterrupted_read_memory( (const void *)RSP_sig(ucontext), &caller, sizeof(caller) );
+    if (bytes != sizeof(caller)) caller = 0;
+    TRACE_(seh)( "patched NtTerminateProcess via %s at %#llx: handle %#llx exit_code %08x "
+                 "rsp %#llx caller_return %#llx caller_read %u\n", instruction,
+                 (unsigned long long)RIP_sig(ucontext), (unsigned long long)R10_sig(ucontext),
+                 (unsigned int)RDX_sig(ucontext), (unsigned long long)RSP_sig(ucontext),
+                 (unsigned long long)caller, (unsigned int)(bytes == sizeof(caller)) );
 }
 
 static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
@@ -2876,38 +2879,64 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     /* the anti-cheat preloader announces itself with an execute fault on
      * a read-only page; patch the fingerprinted Zw stubs before its
      * decision code can read them */
-    if (!eaac_stubs_patched && is_execute_fault_on_readable_page( signal, siginfo, ucontext ))
+    if (!eaac_patch_done && is_execute_fault_on_readable_page( signal, siginfo, ucontext ))
     {
-        eaac_stubs_patched = TRUE;
-        patch_zw_stubs_to_windows();
+        if (!__sync_lock_test_and_set( &eaac_stubs_patched, 1 ))
+        {
+            unsigned int patched = eaac_patch_windows_zw_stubs( write_windows_stub );
+            TRACE_(seh)( "patched %u Zw stubs to Windows 19045 bytes\n", patched );
+            __sync_synchronize();
+            eaac_patch_done = TRUE;
+        }
+        else
+        {
+            unsigned int spins = 0;
+            while (!eaac_patch_done && spins++ < 100000) sched_yield();
+            TRACE_(seh)( "waited for Zw stub patch: done %u spins %u\n", (unsigned int)eaac_patch_done, spins );
+        }
     }
 
-    /* a call into a patched stub branches to the int 0x29 fastfail the
+    /* a call into a patched stub branches to the int 0x2e instruction the
      * byte-exact Windows stub carries whenever wine's KUSER_SHARED_DATA
-     * SystemCall flag is set; dispatch through the stub's surviving
-     * wine tail instead (call *(0x7ffe1000) with the wine id in eax --
-     * the patched mov eax carries the Windows number, so translate it
-     * first) */
+     * SystemCall flag is set.  The stub's wine dispatch tail is gone
+     * (NOP padding, hashed by the loader), so dispatch through the wine
+     * syscall frame instead, with the Windows number translated to the
+     * wine id; the dispatcher lands the guest back at the stub's ret */
     if (eaac_stubs_patched && (signal == SIGSEGV || signal == SIGBUS))
     {
+        extern const void *__wine_syscall_dispatcher_prolog_end_ptr;
         ULONG64 rip = RIP_sig( ucontext );
-        unsigned int i;
-        for (i = 0; i < ARRAY_SIZE(eaac_patched_stubs); i++)
+        if (rip > 0x15 && is_patched_stub_address( rip - 0x15 ) &&
+            *(const BYTE *)rip == 0xcd && *(const BYTE *)(rip + 1) == 0x2e)
         {
-            if (rip != eaac_patched_stubs[i] + 0x15) continue;
-            if (*(const BYTE *)rip != 0xcd || *(const BYTE *)(rip + 1) != 0x29) break;
+            unsigned int id = wine_syscall_id_for_windows_nr( (unsigned int)RAX_sig( ucontext ) );
+            if (id && !(id & WIN_SYSCALL_KNOWN))
             {
-                unsigned int id = wine_syscall_id_for_windows_nr( (unsigned int)RAX_sig( ucontext ) );
-                if (id && !(id & WIN_SYSCALL_KNOWN))
+                struct syscall_frame *frame = get_syscall_frame();
+                ULONG64 stub = rip - 0x15;
+                id--;
+                TRACE_(seh)( "patched-stub call to %#llx: int 0x2e -> wine id %#x\n",
+                             (unsigned long long)stub, id );
+                trace_patched_stub_termination( ucontext, "int 0x2e" );
+                frame->rip = stub + 0x1f;  /* the dispatcher subtracts 0xb -> returns at the stub ret */
+                frame->rcx = rip;
+                frame->eflags = EFL_sig( ucontext );
+                frame->restore_flags = 0;
+                if (instrumentation_callback) frame->restore_flags |= RESTORE_FLAGS_INSTRUMENTATION;
+                RAX_sig( ucontext ) = id;
+                RCX_sig( ucontext ) = (ULONG_PTR)frame;
+                R11_sig( ucontext ) = tf_guest_flags( frame->eflags );
+                if (EFL_sig( ucontext ) & 0x100)
                 {
-                    TRACE_(seh)( "patched-stub call to %#llx: int 0x29 -> wine id %#x\n",
-                                 (unsigned long long)eaac_patched_stubs[i], id );
-                    RAX_sig( ucontext ) = id;
-                    RIP_sig( ucontext ) = eaac_patched_stubs[i] + 0x18;
-                    return;
+                    EFL_sig( ucontext ) &= ~0x100;  /* clear single-step flag */
+                    frame->restore_flags |= CONTEXT_CONTROL;
                 }
-                break;
+                RIP_sig( ucontext ) = (ULONG64)__wine_syscall_dispatcher_prolog_end_ptr;
+                return;
             }
+            if (TRACE_ON(seh) && eaac_xlat_fail_logged++ < 64)
+                TRACE_(seh)( "patched-stub translation failed: int 0x2e at %#llx, Windows nr %#x, cache entry %#x\n",
+                             (unsigned long long)rip, (unsigned int)RAX_sig(ucontext), id );
         }
     }
 
@@ -3238,6 +3267,22 @@ __ASM_GLOBAL_FUNC( __restore_mxcsr_thunk,
                    "popq %rcx\n\t"
                    "jmp " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_prolog_end") );
 
+/* Validate only the flags rejected by NtInitializeRegistry (Windows syscall
+ * 0x101). Valid flags and every other known syscall remain unsupported. */
+extern ULONG unsupported_windows_syscall_status( unsigned int nr, ULONG64 first_arg );
+__ASM_GLOBAL_FUNC( unsupported_windows_syscall_status,
+                   "movl $0xc0000002,%eax\n\t" /* STATUS_NOT_IMPLEMENTED */
+                   "cmpl $0x101,%edi\n\t"
+                   "jne 2f\n\t"
+                   "cmpw $2,%si\n\t"
+                   "jbe 2f\n\t"
+                   "cmpw $0x1000,%si\n\t"
+                   "jb 1f\n\t"
+                   "cmpw $0x13e8,%si\n\t"
+                   "jbe 2f\n\t"
+                   "1: movl $0xc000000d,%eax\n\t" /* STATUS_INVALID_PARAMETER */
+                   "2: ret" );
+
 
 /**********************************************************************
  *		sigsys_handler
@@ -3268,10 +3313,15 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     {
         unsigned int id = wine_syscall_id_for_windows_nr( (unsigned int)RAX_sig(ucontext) );
 
-        TRACE_(seh)("foreign syscall %#x at %p -> wine id %#x.\n", (unsigned int)RAX_sig(ucontext), (void *)rip, id);
+        TRACE_(seh)("foreign syscall %#x at %p -> wine id %#x, args %#llx %#llx %#llx.\n",
+                    (unsigned int)RAX_sig(ucontext), (void *)rip,
+                    id && !(id & WIN_SYSCALL_KNOWN) ? id - 1 : id,
+                    (unsigned long long)R10_sig(ucontext), (unsigned long long)RDX_sig(ucontext),
+                    (unsigned long long)R8_sig(ucontext));
 
         if (id && !(id & WIN_SYSCALL_KNOWN))
         {
+            id--;
             /* resume at the instruction after the syscall instruction;
              * the dispatcher adjusts the return address by -0xb
              * (Legends of Runeterra hack), compensate for it */
@@ -3292,8 +3342,10 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         }
         else
         {
-            RAX_sig( ucontext ) = (id & WIN_SYSCALL_KNOWN) ? STATUS_NOT_IMPLEMENTED
-                                                           : STATUS_INVALID_SYSTEM_SERVICE;
+            RAX_sig( ucontext ) = (id & WIN_SYSCALL_KNOWN)
+                ? (ULONG)unsupported_windows_syscall_status( (unsigned int)RAX_sig( ucontext ),
+                                                              R10_sig( ucontext ) )
+                : (ULONG)STATUS_INVALID_SYSTEM_SERVICE;
             RCX_sig( ucontext ) = rip;   /* Windows leaves the return address in rcx */
             R11_sig( ucontext ) = EFL_sig( ucontext );
             return;
@@ -3303,19 +3355,25 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     {
         /* EAAC gate-5: stubs rewritten with Windows syscall numbers must
          * translate back to wine ids before dispatch; the dispatcher is
-         * indexed by wine id */
-        if (is_patched_stub_address( rip ))
+         * indexed by wine id.  macOS delivers SIGSYS with rip already
+         * advanced to the instruction after the syscall (stub + 0x14) */
+        if (is_patched_stub_address( rip ) || is_patched_stub_address( rip - 0x14 ))
         {
             unsigned int id = wine_syscall_id_for_windows_nr( (unsigned int)RAX_sig( ucontext ) );
             if (id && !(id & WIN_SYSCALL_KNOWN))
             {
+                id--;
                 TRACE_(seh)("patched-stub syscall %#x at %p -> wine id %#x\n",
                             (unsigned int)RAX_sig( ucontext ), (void *)rip, id);
+                trace_patched_stub_termination( ucontext, "syscall" );
                 RAX_sig( ucontext ) = id;
             }
             else
             {
-                RAX_sig( ucontext ) = STATUS_INVALID_SYSTEM_SERVICE;
+                if (TRACE_ON(seh) && eaac_xlat_fail_logged++ < 64)
+                    TRACE_(seh)( "patched-stub translation failed: syscall at %#llx, Windows nr %#x, cache entry %#x\n",
+                                 (unsigned long long)rip, (unsigned int)RAX_sig(ucontext), id );
+                RAX_sig( ucontext ) = (ULONG)STATUS_INVALID_SYSTEM_SERVICE;
                 RCX_sig( ucontext ) = rip;
                 R11_sig( ucontext ) = EFL_sig( ucontext );
                 return;
