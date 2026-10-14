@@ -299,7 +299,9 @@ __ASM_GLOBAL_FUNC( eaac_patch_stubs_native,
                    "movl 8(%rsp),%eax\n\t"
                    "movq 16(%rsp),%rdx\n\t"
                    "movq %rdx,(%rbx,%rax,8)\n\t"
-                   "incl 8(%rsp)\n\t"
+                   "incl %eax\n\t"
+                   "movl %eax,8(%rsp)\n\t"
+                   "movl %eax,(%rbp)\n\t"
                    "2: addq $16,%r12\n\t"
                    "incl (%rsp)\n\t"
                    "jmp 1b\n\t"
@@ -361,7 +363,15 @@ unsigned int eaac_patch_windows_zw_stubs( BOOL (*write_stub)( BYTE *addr, unsign
 /* is addr a Zw stub rewritten by eaac_patch_windows_zw_stubs? */
 BOOL is_patched_stub_address( ULONG64 addr )
 {
-    return eaac_is_patched_stub_native( addr, eaac_patched_stubs, eaac_patched_count );
+    if (eaac_is_patched_stub_native( addr, eaac_patched_stubs, eaac_patched_count ))
+        return TRUE;
+    if (is_wine_syscall_stub_address( addr ))
+    {
+        const ULONG64 *words = (const ULONG64 *)addr;
+        if (words[1] == 0x017ffe03082504f6ULL && words[2] == 0xc32ecdc3050f0375ULL)
+            return TRUE;
+    }
+    return FALSE;
 }
 
 #endif /* __x86_64__ */

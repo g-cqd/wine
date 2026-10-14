@@ -520,11 +520,7 @@ static void test_raw_syscall_registry_flag_boundaries( void )
     {
         raw = raw_syscall( WIN10_19045_NtInitializeRegistry, tests[i].flag, 0, 0, 0, 0 );
         /* Real Windows returns STATUS_ACCESS_DENIED post-boot for accepted
-         * flags; the emulation still answers STATUS_NOT_IMPLEMENTED (review
-         * finding C4, deliberately not implemented - see the handoff's
-         * evasion-disclosure section). Track the gap as todo instead of
-         * failing the suite or pinning the non-Windows status. */
-        todo_wine_if( tests[i].expect == STATUS_ACCESS_DENIED )
+         * flags; the emulation now accurately returns STATUS_ACCESS_DENIED. */
         ok( raw == (ULONG)tests[i].expect,
             "raw NtInitializeRegistry(%#Ix) returned %s, expected %#lx\n",
             tests[i].flag, wine_dbgstr_longlong( raw ), (ULONG)tests[i].expect );

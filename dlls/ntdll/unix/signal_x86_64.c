@@ -2764,6 +2764,40 @@ static inline BOOL check_invalid_gsbase( ucontext_t *ucontext )
 }
 
 
+#ifdef __APPLE__
+/* CW Hack 24265 */
+extern void __restore_mxcsr_thunk(void);
+__ASM_GLOBAL_FUNC( __restore_mxcsr_thunk,
+                   "pushq %rcx\n\t"
+                   "movq %gs:0x30,%rcx\n\t"
+                   "ldmxcsr 0x33c(%rcx)\n\t"  /* amd64_thread_data()->mxcsr */
+                   "popq %rcx\n\t"
+                   "jmp " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_prolog_end") );
+
+static inline void check_rosetta_mxcsr( ucontext_t *ucontext )
+{
+    if (is_rosetta2 && FPU_sig(ucontext))
+    {
+        XMM_SAVE_AREA32 fpu;
+        unsigned int direct_mxcsr;
+        __asm__ volatile( "stmxcsr %0" : "=m" (direct_mxcsr) );
+        memcpy( &fpu, FPU_sig(ucontext), sizeof(fpu) );
+
+        if (direct_mxcsr != fpu.MxCsr)
+        {
+            fpu.MxCsr = direct_mxcsr;
+            memcpy( FPU_sig(ucontext), &fpu, sizeof(fpu) );
+
+            /* On the M3, Rosetta will restore mxcsr to the initial, incorrect
+               value from the sigcontext, even if we change it. So we jump to a
+               thunk that restores the value from amd64_thread_data. */
+            amd64_thread_data()->mxcsr = direct_mxcsr;
+            RIP_sig(ucontext) = (ULONG64)__restore_mxcsr_thunk;
+        }
+    }
+}
+#endif
+
 /**********************************************************************
  *		segv_handler
  *
@@ -2791,17 +2825,22 @@ static volatile BOOL eaac_patch_done;
 static unsigned int eaac_xlat_fail_logged;
 
 /* Write the canonical 32-byte Windows stub image without an intermediate buffer.
- * The first eight bytes contain the caller's syscall number. */
+ * The tail (offsets 24, 16, 8) is written first, and the 8-byte opcode/syscall
+ * header is committed last with a single aligned 64-bit store so concurrent
+ * threads never observe a torn stub. */
 extern void write_windows_stub_image( BYTE *addr, unsigned int nr );
 __ASM_GLOBAL_FUNC( write_windows_stub_image,
-                   "movl $0xb8d18b4c,(%rdi)\n\t"
-                   "movl %esi,4(%rdi)\n\t"
-                   "movabsq $0x017ffe03082504f6,%rax\n\t"
-                   "movq %rax,8(%rdi)\n\t"
-                   "movabsq $0xc32ecdc3050f0375,%rax\n\t"
-                   "movq %rax,16(%rdi)\n\t"
                    "movabsq $0x0000000000841f0f,%rax\n\t"
                    "movq %rax,24(%rdi)\n\t"
+                   "movabsq $0xc32ecdc3050f0375,%rax\n\t"
+                   "movq %rax,16(%rdi)\n\t"
+                   "movabsq $0x017ffe03082504f6,%rax\n\t"
+                   "movq %rax,8(%rdi)\n\t"
+                   "movl %esi,%eax\n\t"
+                   "shlq $32,%rax\n\t"
+                   "movabsq $0x00000000b8d18b4c,%rdx\n\t"
+                   "orq %rdx,%rax\n\t"
+                   "movq %rax,(%rdi)\n\t"
                    "ret" );
 
 /* Make the target pages writable, write the full stub cell, and restore RX. */
@@ -2814,12 +2853,12 @@ static BOOL write_windows_stub( BYTE *addr, unsigned int nr )
     last = ((ULONG64)addr + 31) & ~0xfff;
     if (mprotect( (void *)first, last - first + 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC ))
     {
-        TRACE_(seh)( "stub patch: mprotect failed at %p\n", addr );
+        ERR_(seh)( "stub patch: mprotect failed at %p\n", addr );
         return FALSE;
     }
     write_windows_stub_image( addr, nr );
     if (mprotect( (void *)first, last - first + 0x1000, PROT_READ | PROT_EXEC ))
-        TRACE_(seh)( "stub patch: restore mprotect failed at %p\n", addr );
+        ERR_(seh)( "stub patch: restore mprotect failed at %p\n", addr );
     return TRUE;
 }
 
@@ -2932,6 +2971,9 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                     frame->restore_flags |= CONTEXT_CONTROL;
                 }
                 RIP_sig( ucontext ) = (ULONG64)__wine_syscall_dispatcher_prolog_end_ptr;
+#ifdef __APPLE__
+                check_rosetta_mxcsr( ucontext );
+#endif
                 return;
             }
             if (TRACE_ON(seh) && eaac_xlat_fail_logged++ < 64)
@@ -3257,23 +3299,13 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 }
 
 
-#ifdef __APPLE__
-/* CW Hack 24265 */
-extern void __restore_mxcsr_thunk(void);
-__ASM_GLOBAL_FUNC( __restore_mxcsr_thunk,
-                   "pushq %rcx\n\t"
-                   "movq %gs:0x30,%rcx\n\t"
-                   "ldmxcsr 0x33c(%rcx)\n\t"  /* amd64_thread_data()->mxcsr */
-                   "popq %rcx\n\t"
-                   "jmp " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_prolog_end") );
-
-/* Validate only the flags rejected by NtInitializeRegistry (Windows syscall
- * 0x101). Valid flags and every other known syscall remain unsupported. */
+/* Validate flags for NtInitializeRegistry (Windows syscall 0x101).
+ * Valid flags return STATUS_ACCESS_DENIED; out-of-range flags return STATUS_INVALID_PARAMETER.
+ * Other known syscalls remain unsupported (STATUS_NOT_IMPLEMENTED). */
 extern ULONG unsupported_windows_syscall_status( unsigned int nr, ULONG64 first_arg );
 __ASM_GLOBAL_FUNC( unsupported_windows_syscall_status,
-                   "movl $0xc0000002,%eax\n\t" /* STATUS_NOT_IMPLEMENTED */
                    "cmpl $0x101,%edi\n\t"
-                   "jne 2f\n\t"
+                   "jne 3f\n\t"
                    "cmpw $2,%si\n\t"
                    "jbe 2f\n\t"
                    "cmpw $0x1000,%si\n\t"
@@ -3281,9 +3313,14 @@ __ASM_GLOBAL_FUNC( unsupported_windows_syscall_status,
                    "cmpw $0x13e8,%si\n\t"
                    "jbe 2f\n\t"
                    "1: movl $0xc000000d,%eax\n\t" /* STATUS_INVALID_PARAMETER */
-                   "2: ret" );
+                   "ret\n\t"
+                   "2: movl $0xc0000022,%eax\n\t" /* STATUS_ACCESS_DENIED */
+                   "ret\n\t"
+                   "3: movl $0xc0000002,%eax\n\t" /* STATUS_NOT_IMPLEMENTED */
+                   "ret" );
 
 
+#ifdef __APPLE__
 /**********************************************************************
  *		sigsys_handler
  *
@@ -3394,26 +3431,7 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         RIP_sig( ucontext ) = (ULONG64)__wine_syscall_dispatcher_prolog_end_ptr;
     }
 
-    /* CW Hack 24265 */
-    if (is_rosetta2 && FPU_sig(ucontext))
-    {
-        XMM_SAVE_AREA32 fpu;
-        unsigned int direct_mxcsr;
-        __asm__ volatile( "stmxcsr %0" : "=m" (direct_mxcsr) );
-        memcpy( &fpu, FPU_sig(ucontext), sizeof(fpu) );
-
-        if (direct_mxcsr != fpu.MxCsr)
-        {
-            fpu.MxCsr = direct_mxcsr;
-            memcpy( FPU_sig(ucontext), &fpu, sizeof(fpu) );
-
-            /* On the M3, Rosetta will restore mxcsr to the initial, incorrect
-               value from the sigcontext, even if we change it. So we jump to a
-               thunk that restores the value from amd64_thread_data. */
-            amd64_thread_data()->mxcsr = direct_mxcsr;
-            RIP_sig(ucontext) = (ULONG64)__restore_mxcsr_thunk;
-        }
-    }
+    check_rosetta_mxcsr( ucontext );
 }
 #endif
 
