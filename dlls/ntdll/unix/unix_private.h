@@ -218,6 +218,8 @@ extern int get_compat_large_address_aware(void);
 extern const char *get_x87_sidecar_path(void);
 extern void set_compat_x87( int value, const char *sidecar );
 extern int query_compatdb_x87( const char *unix_path );
+extern char *query_compatdb_env( const char *path );
+extern void apply_compatdb_env( char *env );
 extern NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info, const char *image_path );
 extern NTSTATUS load_builtin( const struct pe_image_info *image_info, UNICODE_STRING *nt_name,
                               ANSI_STRING *exp_name, USHORT machine, SECTION_IMAGE_INFORMATION *info,
