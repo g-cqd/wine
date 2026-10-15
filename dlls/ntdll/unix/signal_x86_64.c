@@ -4330,10 +4330,17 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
                    "movw %dx,%fs\n"
                    "1:\n\t"
 #endif
+                   "movq 0x80(%rcx),%r11\n\t"      /* frame->eflags */
+                   "pushq %r11\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset 8\n\t")
+                   "popfq\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
                    "movq 0x58(%rcx),%r13\n\t"
                    "movq 0x28(%rcx),%rdi\n\t"
                    "movq 0x20(%rcx),%rsi\n\t"
                    "pushq 0x70(%rcx)\n\t"          /* frame->rip */
+                   __ASM_CFI(".cfi_adjust_cfa_offset 8\n\t")
+                   "movq 0x70(%rcx),%rcx\n\t"      /* Windows sysret leaves return RIP in rcx */
                    "ret" )
 
 __ASM_GLOBAL_POINTER( __ASM_NAME("__wine_syscall_dispatcher_prolog_end_ptr"),

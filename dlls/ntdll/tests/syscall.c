@@ -205,6 +205,12 @@ static void test_raw_syscall_dispatch( void )
         WIN10_19045_NtGetNlsSectionPtr, raw, direct );
 }
 
+static NTSTATUS raw_syscall_probe( unsigned int nr, ULONG_PTR arg1, ULONG_PTR arg2,
+                                   ULONG_PTR arg3, ULONG_PTR arg4, ULONG_PTR arg5,
+                                   ULONG64 set_flags, ULONG64 *ret_rcx,
+                                   ULONG64 *ret_r11, ULONG64 *post_flags,
+                                   ULONG64 *ret_expected_rip );
+
 static void test_raw_syscall_wait( void )
 {
     LARGE_INTEGER zero_timeout;
@@ -212,35 +218,46 @@ static void test_raw_syscall_wait( void )
     const LARGE_INTEGER *invalid_timeout = (const LARGE_INTEGER *)(ULONG_PTR)0xffffffffffffd8f0ULL;
     HANDLE event;
     NTSTATUS direct, raw;
+    ULONG64 rcx, r11, post_flags, exp_rip;
 
     zero_timeout.QuadPart = 0;
 
     /* Match the waits used by the EA anti-cheat loader. */
     direct = pNtWaitForSingleObject( GetCurrentProcess(), FALSE, &zero_timeout );
     ok( direct == STATUS_TIMEOUT, "NtWaitForSingleObject(process) returned %08lx\n", direct );
-    raw = raw_syscall( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)GetCurrentProcess(), FALSE,
-                       (ULONG_PTR)&zero_timeout, 0, 0 );
+    raw = raw_syscall_probe( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)GetCurrentProcess(), FALSE,
+                             (ULONG_PTR)&zero_timeout, 0, 0, 0x202, &rcx, &r11, &post_flags, &exp_rip );
     ok( raw == direct, "raw NtWaitForSingleObject(process) returned %08lx, expected %08lx\n", raw, direct );
+    ok( rcx == exp_rip, "NtWaitForSingleObject(process) rcx = %s, expected return rip %s\n",
+        wine_dbgstr_longlong( rcx ), wine_dbgstr_longlong( exp_rip ) );
+    ok( (r11 & 0x202) == 0x202, "NtWaitForSingleObject(process) r11 = %s\n", wine_dbgstr_longlong( r11 ) );
 
     direct = pNtWaitForSingleObject( GetCurrentProcess(), FALSE, invalid_timeout );
     ok( direct == STATUS_ACCESS_VIOLATION, "NtWaitForSingleObject(invalid timeout) returned %08lx\n", direct );
-    raw = raw_syscall( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)GetCurrentProcess(), FALSE,
-                       (ULONG_PTR)invalid_timeout, 0, 0 );
+    raw = raw_syscall_probe( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)GetCurrentProcess(), FALSE,
+                             (ULONG_PTR)invalid_timeout, 0, 0, 0x202, &rcx, &r11, &post_flags, &exp_rip );
     ok( raw == direct, "raw NtWaitForSingleObject(invalid timeout) returned %08lx, expected %08lx\n", raw, direct );
+    ok( rcx == exp_rip, "NtWaitForSingleObject(invalid timeout) rcx = %s, expected return rip %s\n",
+        wine_dbgstr_longlong( rcx ), wine_dbgstr_longlong( exp_rip ) );
 
     direct = pNtWaitForSingleObject( invalid_handle, FALSE, NULL );
     ok( direct == STATUS_INVALID_HANDLE, "NtWaitForSingleObject(invalid handle) returned %08lx\n", direct );
-    raw = raw_syscall( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)invalid_handle, FALSE, 0, 0, 0 );
+    raw = raw_syscall_probe( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)invalid_handle, FALSE,
+                             0, 0, 0, 0x202, &rcx, &r11, &post_flags, &exp_rip );
     ok( raw == direct, "raw NtWaitForSingleObject(invalid handle) returned %08lx, expected %08lx\n", raw, direct );
+    ok( rcx == exp_rip, "NtWaitForSingleObject(invalid handle) rcx = %s, expected return rip %s\n",
+        wine_dbgstr_longlong( rcx ), wine_dbgstr_longlong( exp_rip ) );
 
     event = CreateEventW( NULL, TRUE, TRUE, NULL );
     ok( event != NULL, "CreateEventW failed, error %lu\n", GetLastError() );
     if (!event) return;
     direct = pNtWaitForSingleObject( event, FALSE, &zero_timeout );
     ok( direct == STATUS_SUCCESS, "NtWaitForSingleObject(signaled event) returned %08lx\n", direct );
-    raw = raw_syscall( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)event, FALSE,
-                       (ULONG_PTR)&zero_timeout, 0, 0 );
+    raw = raw_syscall_probe( WIN10_19045_NtWaitForSingleObject, (ULONG_PTR)event, FALSE,
+                             (ULONG_PTR)&zero_timeout, 0, 0, 0x202, &rcx, &r11, &post_flags, &exp_rip );
     ok( raw == direct, "raw NtWaitForSingleObject(signaled event) returned %08lx, expected %08lx\n", raw, direct );
+    ok( rcx == exp_rip, "NtWaitForSingleObject(signaled event) rcx = %s, expected return rip %s\n",
+        wine_dbgstr_longlong( rcx ), wine_dbgstr_longlong( exp_rip ) );
     CloseHandle( event );
 }
 
@@ -251,11 +268,12 @@ static void test_raw_syscall_wait( void )
 static NTSTATUS raw_syscall_probe( unsigned int nr, ULONG_PTR arg1, ULONG_PTR arg2,
                                    ULONG_PTR arg3, ULONG_PTR arg4, ULONG_PTR arg5,
                                    ULONG64 set_flags, ULONG64 *ret_rcx,
-                                   ULONG64 *ret_r11, ULONG64 *post_flags )
+                                   ULONG64 *ret_r11, ULONG64 *post_flags,
+                                   ULONG64 *ret_expected_rip )
 {
     NTSTATUS status;
     ULONG64 r11, after;
-    ULONG64 rcx_out;
+    ULONG64 rcx_out, exp_rip;
     __asm__( "movq %[a1], %%rcx\n\t"
              "movq %[a2], %%rdx\n\t"
              "movq %[a3], %%r8\n\t"
@@ -270,18 +288,21 @@ static NTSTATUS raw_syscall_probe( unsigned int nr, ULONG_PTR arg1, ULONG_PTR ar
              "popfq\n\t"
              "movl %[nr], %%eax\n\t"
              "syscall\n\t"
-             "movq %%r11, %[r11]\n\t"
+             "1:\tmovq %%r11, %[r11]\n\t"
              "movq %%rcx, %[rcxo]\n\t"
+             "leaq 1b(%%rip), %%rsi\n\t"
+             "movq %%rsi, %[expr]\n\t"
              "pushfq\n\t"
              "popq %[after]\n\t"
              "addq $0x28, %%rsp\n\t"
-             : [out] "=a"(status), [r11] "=r"(r11), [rcxo] "=r"(rcx_out), [after] "=r"(after)
+             : [out] "=a"(status), [r11] "=r"(r11), [rcxo] "=r"(rcx_out), [after] "=r"(after), [expr] "=r"(exp_rip)
              : [nr] "g"(nr), [a1] "g"(arg1), [a2] "g"(arg2), [a3] "g"(arg3),
                [a4] "g"(arg4), [a5] "g"(arg5), [sf] "r"(set_flags)
              : "rcx", "rdx", "r8", "r9", "r10", "rsi", "memory" );
     *ret_rcx = rcx_out;
     *ret_r11 = r11;
     *post_flags = after;
+    if (ret_expected_rip) *ret_expected_rip = exp_rip;
     return status;
 }
 
@@ -294,7 +315,7 @@ static void test_raw_syscall_register_semantics( void )
         { 0x40000, "AC" },       /* alignment check */
     };
     NTSTATUS status, direct;
-    ULONG64 rcx, r11, post_flags;
+    ULONG64 rcx, r11, post_flags, exp_rip;
     unsigned int i;
 
     /* Windows semantics: syscall stores RFLAGS in r11 and leaves the
@@ -303,7 +324,7 @@ static void test_raw_syscall_register_semantics( void )
     for (i = 0; i < ARRAY_SIZE(flag_tests); i++)
     {
         status = raw_syscall_probe( WIN10_19045_NtGetNlsSectionPtr, 0xdeadbeef, 0, 0, 0, 0,
-                                    flag_tests[i].mask, &rcx, &r11, &post_flags );
+                                    flag_tests[i].mask, &rcx, &r11, &post_flags, &exp_rip );
 
         ok( (r11 & flag_tests[i].mask) == flag_tests[i].mask,
             "%s: r11 = %s, expected set flags preserved\n",
@@ -311,14 +332,17 @@ static void test_raw_syscall_register_semantics( void )
         ok( (post_flags & flag_tests[i].mask) == flag_tests[i].mask,
             "%s: post-syscall flags = %s, expected set flags restored\n",
             flag_tests[i].name, wine_dbgstr_longlong( post_flags ) );
+        ok( rcx == exp_rip, "%s: rcx = %s, expected return rip %s\n",
+            flag_tests[i].name, wine_dbgstr_longlong( rcx ), wine_dbgstr_longlong( exp_rip ) );
     }
 
     status = raw_syscall_probe( WIN10_19045_NtGetNlsSectionPtr, 0xdeadbeef, 0, 0, 0, 0,
-                                0x202, &rcx, &r11, &post_flags );
+                                0x202, &rcx, &r11, &post_flags, &exp_rip );
     direct = pNtGetNlsSectionPtr( 0xdeadbeef, 0, NULL, NULL, NULL );
     ok( status == direct, "raw syscall returned %08lx, expected %08lx\n", status, direct );
-    /* rcx must hold the address of the instruction after the syscall */
-    ok( (rcx & 0xfff) != 0, "rcx = %s, expected a return address\n", wine_dbgstr_longlong( rcx ) );
+    /* rcx must hold the exact address of the instruction after the syscall */
+    ok( rcx == exp_rip, "rcx = %s, expected return rip %s\n",
+        wine_dbgstr_longlong( rcx ), wine_dbgstr_longlong( exp_rip ) );
 }
 
 static void test_raw_syscall_invalid_number( void )
