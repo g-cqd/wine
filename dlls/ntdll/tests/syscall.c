@@ -986,6 +986,7 @@ static void eaac_page_prot_child(void)
  * variable only reaches the child's unix environment with the __CX_UNIX_
  * prefix. */
 #define EAAC_GATE_EXE "EAAntiCheat.GameService.exe"
+#define EAAC_GATE_LAUNCHER_EXE "EAAntiCheat.GameServiceLauncher.exe"
 #define EAAC_PATCH_EXES_VAR "WINE_EAAC_PATCH_EXES"
 
 /* Run "<exe_name> <test> <args>" from a copy of this exe in a fresh temporary
@@ -1133,12 +1134,15 @@ static void test_eaac_process_gate( void )
         BOOL patched;
     } cases[] =
     {
-        /* the built-in name, whatever its case */
+        /* the built-in names, whatever their case */
         { EAAC_GATE_EXE,                       NULL, TRUE },
         { "eaanticheat.gameservice.exe",       NULL, TRUE },
+        { EAAC_GATE_LAUNCHER_EXE,              NULL, TRUE },
+        { "eaanticheat.gameservicelauncher.exe", NULL, TRUE },
         /* no match: another name, and a name that merely ends in the built-in one */
         { "unrelated_game.exe",                NULL, FALSE },
         { "NotEAAntiCheat.GameService.exe",    NULL, FALSE },
+        { "NotEAAntiCheat.GameServiceLauncher.exe", NULL, FALSE },
         /* the environment adds names, case-insensitively, ignoring empty entries */
         { "unrelated_game.exe",                "foo.exe;unrelated_game.exe", TRUE },
         { "unrelated_game.exe",                ";;UNRELATED_GAME.EXE;", TRUE },

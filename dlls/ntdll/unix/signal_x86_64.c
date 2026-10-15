@@ -2898,7 +2898,7 @@ static BOOL eaac_monotonic_ns( UINT64 *ns )
  * the GameService.  WINE_EAAC_PATCH_EXES (a ';'-separated list of file names)
  * adds more names.  Entries are not whitespace-trimmed, entries with a path
  * never match, and non-ASCII names never match. */
-static const char eaac_patch_builtin_exes[] = "EAAntiCheat.GameService.exe";
+static const char eaac_patch_builtin_exes[] = "EAAntiCheat.GameService.exe;EAAntiCheat.GameServiceLauncher.exe";
 static char *eaac_patch_env_exes;  /* private copy of WINE_EAAC_PATCH_EXES */
 static BOOL eaac_patch_enabled;    /* default closed, set by eaac_patch_init_gate */
 
