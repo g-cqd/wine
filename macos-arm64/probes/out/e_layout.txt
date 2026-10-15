@@ -1,0 +1,16 @@
+/tmp/wa64p/layout.app/Contents/MacOS/second: replacing existing signature
+/tmp/wa64p/layout.app/Contents/Helpers/helper: replacing existing signature
+/tmp/wa64p/layout.app: replacing existing signature
+### /tmp/wa64p/layout.app/Contents/MacOS/main
+[layout pid 59194] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+spawn[4k] child exit=0
+### /tmp/wa64p/layout.app/Contents/MacOS/second
+spawn[4k] rc=88 (Malformed Mach-o file)
+### /tmp/wa64p/layout.app/Contents/Helpers/helper
+spawn[4k] rc=88 (Malformed Mach-o file)
+### /tmp/wa64p/outside/symlink_main
+[layout pid 59253] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+spawn[4k] child exit=0
+### /tmp/wa64p/outside/hardlink_main
+[layout pid 59260] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+spawn[4k] child exit=0

@@ -1,0 +1,11 @@
+ dlls/dbghelp/dwarf.c            |   11 +++++-
+ dlls/ntdll/unix/loader.c        |   21 +++++++++++++
+ dlls/win32u/freetype.c          |   15 +++++++--
+ dlls/win32u/sysparams.c         |    9 +++++
+ dlls/winemac.drv/cocoa_app.h    |    1 
+ dlls/winemac.drv/cocoa_app.m    |   64 +++++++++++++++++-----------------------
+ dlls/winemac.drv/cocoa_window.m |   17 ++++++----
+ dlls/winemac.drv/gdi.c          |    7 ----
+ include/wine/unixlib.h          |    1 
+ loader/wine.inf.in              |    1 
+ 10 files changed, 94 insertions(+), 53 deletions(-)

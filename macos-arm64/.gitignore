@@ -1,0 +1,7 @@
+build/
+install/
+host/
+mtld3d/
+sdk-arm64x/
+toolchain/
+d3dtest/

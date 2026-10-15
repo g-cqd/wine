@@ -1,0 +1,55 @@
+### start 4K, mode report
+[report pid 63994] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+spawn[4k] child exit=0
+### start 4K, mode exec_attr
+[parent pid 63996] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+[SETEXEC+4k-attr pid 63996] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+spawn[4k] child exit=0
+### start 4K, mode exec_plain
+[parent pid 63998] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+[SETEXEC-no-attr pid 63998] getpagesize=16384 vm_page_size=16384 task page_size=16384 min_address=0x4000
+spawn[4k] child exit=0
+### start 4K, mode execve
+[parent pid 64000] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+[execve pid 64000] getpagesize=16384 vm_page_size=16384 task page_size=16384 min_address=0x4000
+spawn[4k] child exit=0
+### start 4K, mode spawn_attr
+[parent pid 64002] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+[spawn+4k-attr pid 64003] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+  child exit 0
+spawn[4k] child exit=0
+### start 4K, mode spawn_plain
+[parent pid 64005] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+[spawn-no-attr pid 64006] getpagesize=16384 vm_page_size=16384 task page_size=16384 min_address=0x4000
+  child exit 0
+spawn[4k] child exit=0
+### start 4K, mode forkexec
+[parent pid 64008] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+[fork+execve pid 64009] getpagesize=16384 vm_page_size=16384 task page_size=16384 min_address=0x4000
+  forkexec child status 0
+spawn[4k] child exit=0
+### start 4K, mode sys_plain
+[parent pid 64011] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+  system binary /usr/bin/pagesize, no attr:
+16384
+  child exit 0
+spawn[4k] child exit=0
+### start 4K, mode sys_attr
+[parent pid 64014] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+  system binary /usr/bin/pagesize, 4k attr:
+  posix_spawn(/usr/bin/pagesize, 4k=1, setexec=0) rc=88 (Malformed Mach-o file)
+spawn[4k] child exit=88
+### start 4K, mode exec_sys
+[parent pid 64017] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+  SETEXEC (no attr) of system /usr/bin/pagesize:
+16384
+spawn[4k] child exit=0
+### start 16K, mode exec_attr
+[parent pid 64019] getpagesize=16384 vm_page_size=16384 task page_size=16384 min_address=0x4000
+[SETEXEC+4k-attr pid 64019] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+spawn[plain] child exit=0
+### start 16K, mode spawn_attr
+[parent pid 64021] getpagesize=16384 vm_page_size=16384 task page_size=16384 min_address=0x4000
+[spawn+4k-attr pid 64022] getpagesize=4096 vm_page_size=4096 task page_size=4096 min_address=0x1000
+  child exit 0
+spawn[plain] child exit=0

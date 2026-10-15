@@ -1,0 +1,29 @@
+From 80688103af1883725ebaba75a5f3b6e864c23610 Mon Sep 17 00:00:00 2001
+From: Gigi <42325924+g-cqd@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 01:07:13 +0200
+Subject: [PATCH 06/12] winemac.drv: CLIENT_SURFACE_PRESENTED handler is part
+ of the x86_64-only D3DMetal hooks
+
+---
+ dlls/winemac.drv/event.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlls/winemac.drv/event.c b/dlls/winemac.drv/event.c
+index d9ae30b..b883fea 100644
+--- a/dlls/winemac.drv/event.c
++++ b/dlls/winemac.drv/event.c
+@@ -399,9 +399,11 @@ void macdrv_handle_event(const macdrv_event *event)
+     case APP_QUIT_REQUESTED:
+         macdrv_app_quit_requested(event);
+         break;
++#if defined(__x86_64__)  /* D3DMetal hooks (d3dmetal.c) exist only for x86_64 */
+     case CLIENT_SURFACE_PRESENTED:    /* CW HACK 22435 */
+ 	macdrv_client_surface_presented(event);
+ 	break;
++#endif
+     case DISPLAYS_CHANGED:
+         macdrv_displays_changed(event);
+         break;
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,135 @@
+### ad-hoc, no entitlements, plain (x18 API without cross-arch entitlement)
+./run_all.sh: line 14: 63749 Trace/BPT trap: 5       $W/x18b_adhoc
+rc=133
+### x18_noent plain (x18 treated as ordinary register, no os_set_custom_x18_abi_enabled)
+x18 probe: pid 63753 pagesize 16384
+  immediate                          x18=0x1122334455667788 OK
+  (printf with x18 live)
+  after printf                       x18=0x1122334455667788 OK
+  after raw svc getpid               x18=0x0000000000000000 CLOBBERED
+  after libc write                   x18=0x0000000000000000 CLOBBERED
+  after usleep(1ms)                  x18=0x0000000000000000 CLOBBERED
+  after sched_yield                  x18=0x0000000000000000 CLOBBERED
+  SIGUSR1: hits=1 handler-entry x18=0x0 (zero)
+  after SIGUSR1 return (handler set x18) x18=0x0000000000000000 CLOBBERED
+  SIGSEGV: handler-entry x18=0x0 (zero)
+  after SIGSEGV return               x18=0x0000000000000000 CLOBBERED
+  24 threads x 3000000 iters (yield+usleep): clobber count=70587; new-thread initial x18: zero=24 inherited=0 other=0
+  main after thread storm            x18=0x0000000000000000 CLOBBERED
+  400M-iteration busy loop (timer preemption): clobbers=44
+RESULT NOT-PERSISTENT
+spawn[plain] child exit=0
+### x18_noent 4k (x18 treated as ordinary register, no os_set_custom_x18_abi_enabled)
+x18 probe: pid 63792 pagesize 4096
+  immediate                          x18=0x1122334455667788 OK
+  (printf with x18 live)
+  after printf                       x18=0x0000000000000000 CLOBBERED
+  after raw svc getpid               x18=0x0000000000000000 CLOBBERED
+  after libc write                   x18=0x0000000000000000 CLOBBERED
+  after usleep(1ms)                  x18=0x0000000000000000 CLOBBERED
+  after sched_yield                  x18=0x0000000000000000 CLOBBERED
+  SIGUSR1: hits=1 handler-entry x18=0x0 (zero)
+  after SIGUSR1 return (handler set x18) x18=0x0000000000000000 CLOBBERED
+  SIGSEGV: handler-entry x18=0x0 (zero)
+  after SIGSEGV return               x18=0x0000000000000000 CLOBBERED
+  24 threads x 3000000 iters (yield+usleep): clobber count=70632; new-thread initial x18: zero=24 inherited=0 other=0
+  main after thread storm            x18=0x0000000000000000 CLOBBERED
+  400M-iteration busy loop (timer preemption): clobbers=34
+RESULT NOT-PERSISTENT
+spawn[4k] child exit=0
+### x18_ent plain (x18 treated as ordinary register, no os_set_custom_x18_abi_enabled)
+x18 probe: pid 63796 pagesize 16384
+  immediate                          x18=0x1122334455667788 OK
+  (printf with x18 live)
+  after printf                       x18=0x1122334455667788 OK
+  after raw svc getpid               x18=0x0000000000000000 CLOBBERED
+  after libc write                   x18=0x0000000000000000 CLOBBERED
+  after usleep(1ms)                  x18=0x0000000000000000 CLOBBERED
+  after sched_yield                  x18=0x0000000000000000 CLOBBERED
+  SIGUSR1: hits=1 handler-entry x18=0x0 (zero)
+  after SIGUSR1 return (handler set x18) x18=0x0000000000000000 CLOBBERED
+  SIGSEGV: handler-entry x18=0x0 (zero)
+  after SIGSEGV return               x18=0x0000000000000000 CLOBBERED
+  24 threads x 3000000 iters (yield+usleep): clobber count=70594; new-thread initial x18: zero=24 inherited=0 other=0
+  main after thread storm            x18=0x0000000000000000 CLOBBERED
+  400M-iteration busy loop (timer preemption): clobbers=43
+RESULT NOT-PERSISTENT
+spawn[plain] child exit=0
+### x18_ent 4k (x18 treated as ordinary register, no os_set_custom_x18_abi_enabled)
+x18 probe: pid 63799 pagesize 4096
+  immediate                          x18=0x1122334455667788 OK
+  (printf with x18 live)
+  after printf                       x18=0x1122334455667788 OK
+  after raw svc getpid               x18=0x0000000000000000 CLOBBERED
+  after libc write                   x18=0x0000000000000000 CLOBBERED
+  after usleep(1ms)                  x18=0x0000000000000000 CLOBBERED
+  after sched_yield                  x18=0x0000000000000000 CLOBBERED
+  SIGUSR1: hits=1 handler-entry x18=0x0 (zero)
+  after SIGUSR1 return (handler set x18) x18=0x0000000000000000 CLOBBERED
+  SIGSEGV: handler-entry x18=0x0 (zero)
+  after SIGSEGV return               x18=0x0000000000000000 CLOBBERED
+  24 threads x 3000000 iters (yield+usleep): clobber count=70595; new-thread initial x18: zero=24 inherited=0 other=0
+  main after thread storm            x18=0x0000000000000000 CLOBBERED
+  400M-iteration busy loop (timer preemption): clobbers=41
+RESULT NOT-PERSISTENT
+spawn[4k] child exit=0
+### x18b_noent plain (os_set_custom_x18_abi_enabled(true))
+x18 custom-ABI probe: pid 63801 pagesize 16384, custom_enabled(initial)=0
+  toggle true+false pair: 16.8 ns
+  immediate                x18=0x1122334455667788 OK
+  raw svc getpid           x18=0x1122334455667788 OK
+  raw select(1ms)          x18=0x1122334455667788 OK
+  mach trap swtch_pri      x18=0x1122334455667788 OK
+  after SIGUSR1 return     x18=0x1122334455667788 OK
+  after SIGSEGV return     x18=0x1122334455667788 OK
+  SIGUSR1 handler entry: x18=0x1122334455667788 custom_mode_at_entry=1 hits=1
+  SIGSEGV handler entry: x18=0x1122334455667788 custom_mode_at_entry=1
+  24 threads x 3000000 iters (raw swtch_pri + select sleeps): clobbers=0; initial x18 zero in 24/24
+  400M busy loop (timer preemption): clobbers=0
+RESULT PERSISTENT (syscalls ok, signals ok)
+spawn[plain] child exit=0
+### x18b_noent 4k (os_set_custom_x18_abi_enabled(true))
+x18 custom-ABI probe: pid 63803 pagesize 4096, custom_enabled(initial)=0
+  toggle true+false pair: 16.2 ns
+  immediate                x18=0x1122334455667788 OK
+  raw svc getpid           x18=0x1122334455667788 OK
+  raw select(1ms)          x18=0x1122334455667788 OK
+  mach trap swtch_pri      x18=0x1122334455667788 OK
+  after SIGUSR1 return     x18=0x1122334455667788 OK
+  after SIGSEGV return     x18=0x1122334455667788 OK
+  SIGUSR1 handler entry: x18=0x1122334455667788 custom_mode_at_entry=1 hits=1
+  SIGSEGV handler entry: x18=0x1122334455667788 custom_mode_at_entry=1
+  24 threads x 3000000 iters (raw swtch_pri + select sleeps): clobbers=0; initial x18 zero in 24/24
+  400M busy loop (timer preemption): clobbers=0
+RESULT PERSISTENT (syscalls ok, signals ok)
+spawn[4k] child exit=0
+### x18b_ent plain (os_set_custom_x18_abi_enabled(true))
+x18 custom-ABI probe: pid 63842 pagesize 16384, custom_enabled(initial)=0
+  toggle true+false pair: 17.1 ns
+  immediate                x18=0x1122334455667788 OK
+  raw svc getpid           x18=0x1122334455667788 OK
+  raw select(1ms)          x18=0x1122334455667788 OK
+  mach trap swtch_pri      x18=0x1122334455667788 OK
+  after SIGUSR1 return     x18=0x1122334455667788 OK
+  after SIGSEGV return     x18=0x1122334455667788 OK
+  SIGUSR1 handler entry: x18=0x1122334455667788 custom_mode_at_entry=1 hits=1
+  SIGSEGV handler entry: x18=0x1122334455667788 custom_mode_at_entry=1
+  24 threads x 3000000 iters (raw swtch_pri + select sleeps): clobbers=0; initial x18 zero in 24/24
+  400M busy loop (timer preemption): clobbers=0
+RESULT PERSISTENT (syscalls ok, signals ok)
+spawn[plain] child exit=0
+### x18b_ent 4k (os_set_custom_x18_abi_enabled(true))
+x18 custom-ABI probe: pid 63844 pagesize 4096, custom_enabled(initial)=0
+  toggle true+false pair: 16.9 ns
+  immediate                x18=0x1122334455667788 OK
+  raw svc getpid           x18=0x1122334455667788 OK
+  raw select(1ms)          x18=0x1122334455667788 OK
+  mach trap swtch_pri      x18=0x1122334455667788 OK
+  after SIGUSR1 return     x18=0x1122334455667788 OK
+  after SIGSEGV return     x18=0x1122334455667788 OK
+  SIGUSR1 handler entry: x18=0x1122334455667788 custom_mode_at_entry=1 hits=1
+  SIGSEGV handler entry: x18=0x1122334455667788 custom_mode_at_entry=1
+  24 threads x 3000000 iters (raw swtch_pri + select sleeps): clobbers=0; initial x18 zero in 24/24
+  400M busy loop (timer preemption): clobbers=0
+RESULT PERSISTENT (syscalls ok, signals ok)
+spawn[4k] child exit=0

@@ -1,0 +1,48 @@
+From 20c0848fd2216beac86b3823f9a07f57452a8779 Mon Sep 17 00:00:00 2001
+From: Gigi <42325924+g-cqd@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 23:05:09 +0200
+Subject: [PATCH 01/12] configure: arm64 loader links with the default 4 GiB
+ soft page zero (+x86_64_layout_emulation); -pagezero_size 0x1000 fails on
+ arm64
+
+---
+ configure    | 4 ++++
+ configure.ac | 7 +++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/configure b/configure
+index 26e224a..d681d75 100755
+--- a/configure
++++ b/configure
+@@ -11828,6 +11828,10 @@ else case e in #(
+ esac
+ fi
+         ;;
++      aarch64)
++        wine_use_preloader=no
++        WINELOADER_LDFLAGS="-Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist -Wl,-x86_64_layout_emulation"
++        ;;
+       *)    wine_use_preloader=no ;;
+     esac
+ 
+diff --git a/configure.ac b/configure.ac
+index bf8e3c0..e08ed7b 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -956,6 +956,13 @@ case $host_os in
+             WINELOADER_LDFLAGS="$WINELOADER_LDFLAGS -Wl,-no_pie,-image_base,0x200000000,-no_huge,-no_fixup_chains,-segalign,0x1000,-segaddr,WINE_RESERVE,0x1000,-segaddr,WINE_TOP_DOWN,0x7ff000000000"],
+            [wine_use_preloader=yes])
+         ;;
++      aarch64)
++        dnl Entitled arm64 process (com.apple.developer.cross-architecture-support): the kernel keeps a 1-page
++        dnl hard page zero and maps the rest of the default 4 GiB __PAGEZERO as a soft, replaceable entry, which
++        dnl is the low-4GiB reserve. Smaller -pagezero_size values or -segalign 0x1000 break the arm64 load.
++        wine_use_preloader=no
++        WINELOADER_LDFLAGS="-Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist -Wl,-x86_64_layout_emulation"
++        ;;
+       *)    wine_use_preloader=no ;;
+     esac
+ 
+-- 
+2.55.0
+

@@ -1,0 +1,29 @@
+From f0b6823a98ce217a00328c82712fbf42249933fd Mon Sep 17 00:00:00 2001
+From: Gigi <42325924+g-cqd@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 23:29:29 +0200
+Subject: [PATCH 04/12] winemac.drv: WineMetalLayer (D3DMetal hook) is
+ x86_64-only; use CAMetalLayer on arm64
+
+---
+ dlls/winemac.drv/cocoa_window.m | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
+index 578ee10..cb7c4d2 100644
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -1021,7 +1021,11 @@ - (void) setRetinaMode:(BOOL)mode
+ 
+     - (CALayer*) makeBackingLayer
+     {
++#if defined(__x86_64__)
+         CAMetalLayer *layer = [WineMetalLayer layer];   /* CW HACK 22435 */
++#else   /* D3DMetal (and WineMetalLayer) exist only for x86_64 */
++        CAMetalLayer *layer = [CAMetalLayer layer];
++#endif
+         layer.device = _device;
+         layer.framebufferOnly = YES;
+         layer.magnificationFilter = metal_layer_filter(retina_on);
+-- 
+2.54.0 (Apple Git-157)
+

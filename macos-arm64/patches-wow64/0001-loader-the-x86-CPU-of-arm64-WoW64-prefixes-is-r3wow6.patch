@@ -1,0 +1,28 @@
+From cf90b43bfa03d066b4ac0784924dd69d82ace9b8 Mon Sep 17 00:00:00 2001
+From: Gigi <42325924+g-cqd@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 02:46:48 +0200
+Subject: [PATCH] loader: the x86 CPU of arm64 WoW64 prefixes is r3wow64.dll
+ (rosetta3 translator behind a PE shim), not xtajit.dll
+
+xtajit.dll (the x86 emulator of Windows on ARM) does not exist in Wine; r3wow64.dll is built from rosetta3's crates/r3-wow64/pe
+and installed next to the unix library r3wow64.so. The KnownDLLs entries for xtajit stay (harmless).
+---
+ loader/wine.inf.in | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/loader/wine.inf.in b/loader/wine.inf.in
+index f0f5d88..52d6001 100644
+--- a/loader/wine.inf.in
++++ b/loader/wine.inf.in
+@@ -395,7 +395,7 @@ HKLM,%CurrentVersion%,"ProgramFilesDir (Arm)",,"C:\Program Files (Arm)"
+ HKLM,%CurrentVersion%,"CommonFilesDir (Arm)",,"C:\Program Files (Arm)\Common Files"
+ HKLM,Software\Microsoft\Wow64\amd64,,2,"xtajit64.dll"
+ HKLM,Software\Microsoft\Wow64\arm,,2,"wowarmhw.dll"
+-HKLM,Software\Microsoft\Wow64\x86,,2,"xtajit.dll"
++HKLM,Software\Microsoft\Wow64\x86,,2,"r3wow64.dll"
+ 
+ [CurrentVersionWow64.ntx86]
+ HKLM,%CurrentVersion%,"ProgramFilesDir (x86)",,"%16422%"
+-- 
+2.55.0
+

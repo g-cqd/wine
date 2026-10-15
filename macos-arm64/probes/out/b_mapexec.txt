@@ -1,0 +1,252 @@
+### mx_rt (4k)
+mapexec: pid 63931 pagesize 4096
+  --- base 0x10000000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+  --- base 0x400000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+  --- base 0x7ffe0000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+spawn[4k] child exit=0
+### mx_rt_aue (4k)
+mapexec: pid 63933 pagesize 4096
+  --- base 0x10000000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+  --- base 0x400000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+  --- base 0x7ffe0000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+spawn[4k] child exit=0
+### mx_dep (4k)
+mapexec: pid 63973 pagesize 4096
+  --- base 0x10000000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+  --- base 0x400000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+  --- base 0x7ffe0000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+spawn[4k] child exit=0
+### mx_nort (4k)
+mapexec: pid 63976 pagesize 4096
+  --- base 0x10000000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+  --- base 0x400000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+  --- base 0x7ffe0000 ---
+  b1 mmap(R|X, PRIVATE|FIXED, file@0x1000) -> FAIL errno 1
+  b1b mmap(R|X, 0x2000, file@0x1000) -> FAIL errno 1
+  b2 mmap(RW, PRIVATE|FIXED, file) -> ok errno 0
+  b2 mprotect(R|X) after write -> 0 errno 0
+    b2 exec: executed, returned 42
+  b2 mprotect(RWX) -> -1 errno 13
+  b3 anon RW fixed -> ok errno 0
+  b3 mprotect(R|X) after write -> 0 errno 0
+    b3 exec: executed, returned 42
+    b8 exec#1: executed, returned 42
+  b8 RX->RW 0, write, RW->RX 0 (expect exec returns 43)
+    b8 exec#2: executed, returned 43
+  b9 clean MAP_PRIVATE RO -> mprotect(R|X) -> 0 errno 0
+    b9 exec: executed, returned 42
+  b9s clean MAP_SHARED RO -> mprotect(R|X) -> 0 errno 0
+  b4 anon RWX no MAP_JIT fixed -> FAIL errno 13
+  b5 anon RWX MAP_JIT|MAP_FIXED -> ok errno 0
+    b5 exec: executed, returned 42
+  b7 file R|X MAP_SHARED|FIXED -> FAIL errno 1
+spawn[4k] child exit=0

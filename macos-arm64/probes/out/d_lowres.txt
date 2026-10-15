@@ -1,0 +1,144 @@
+### default (4k)
+lowres: pid 64079 pagesize 4096 min_address 0x1000 image at 0x10438a000
+  dyld shared cache: 0x1955d0000 + 0x1cb0f8000 (end 0x3606c8000)
+  [at start, below 8 GiB] regions in [0x0, 0x200000000):
+    0x00000001000-0x0010438a000  4263460K prot ---/--- 
+    0x0010438a000-0x0010438e000       16K prot r-x/r-x 
+    0x0010438e000-0x00104392000       16K prot r--/rw- 
+    0x00104392000-0x00104398000       24K prot r--/r-- 
+    0x00104398000-0x0010439a000        8K prot r--/r-- 
+    0x0010439a000-0x0010439e000       16K prot r--/r-- 
+    0x0010439e000-0x001043a2000       16K prot r--/r-- 
+    0x001043a2000-0x001043a6000       16K prot r--/r-- 
+    0x001043a6000-0x001043a8000        8K prot rw-/rwx 
+    0x001043a8000-0x001043b0000       32K prot r--/r-- 
+    0x001044a8000-0x00104519000      452K prot ---/--- 
+    0x00104519000-0x0010451c000       12K prot ---/--- 
+    0x0010451c000-0x00104794000     2528K prot ---/--- 
+    0x00104794000-0x00104835000      644K prot rw-/rwx 
+    ... 32 regions total in range
+  reserve mmap(0x1000, 0xFFFFF000, PROT_NONE, FIXED|NORESERVE) -> ok errno 0
+  [after reserve, below 8 GiB] regions in [0x0, 0x200000000):
+    0x00000001000-0x00008001000   131072K prot ---/rwx 
+    0x00008001000-0x00010001000   131072K prot ---/rwx 
+    0x00010001000-0x00018001000   131072K prot ---/rwx 
+    0x00018001000-0x00020001000   131072K prot ---/rwx 
+    0x00020001000-0x00028001000   131072K prot ---/rwx 
+    0x00028001000-0x00030001000   131072K prot ---/rwx 
+    0x00030001000-0x00038001000   131072K prot ---/rwx 
+    0x00038001000-0x00040001000   131072K prot ---/rwx 
+    0x00040001000-0x00048001000   131072K prot ---/rwx 
+    0x00048001000-0x00050001000   131072K prot ---/rwx 
+    0x00050001000-0x00058001000   131072K prot ---/rwx 
+    0x00058001000-0x00060001000   131072K prot ---/rwx 
+    0x00060001000-0x00068001000   131072K prot ---/rwx 
+    0x00068001000-0x00070001000   131072K prot ---/rwx 
+    ... 64 regions total in range
+  dlopen /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation       ok
+  dlopen /System/Library/Frameworks/Metal.framework/Metal                         ok
+  dlopen /System/Library/Frameworks/CoreAudio.framework/CoreAudio                 ok
+  dlopen /System/Library/Frameworks/AppKit.framework/AppKit                       ok
+  dlopen /usr/lib/libz.dylib                                                      ok
+  dlopen /opt/homebrew/opt/freetype/lib/libfreetype.6.dylib                       ok
+  dlopen /opt/homebrew/opt/gnutls/lib/libgnutls.30.dylib                          ok
+  after hammering (4000 NULL-hint mmaps, 512MiB malloc, 8 threads, 7 dlopens): allocations below 4 GiB = 0, lowest address seen 0x1043b0000
+  carve: 0x10000000 ok, 0x7ffe0000 ok, 0xfffe0000 ok, 0x1000 ok
+  munmap of carved area -> 0 (hole now returns to the process; a re-reserve step is needed after munmap)
+spawn[4k] child exit=0
+### emul (4k)
+lowres: pid 64133 pagesize 4096 min_address 0x1000 image at 0x100482000
+  dyld shared cache: 0x1955d0000 + 0x1cb0f8000 (end 0x3606c8000)
+  [at start, below 8 GiB] regions in [0x0, 0x200000000):
+    0x00000001000-0x00100482000  4198916K prot ---/--- 
+    0x00100482000-0x00100486000       16K prot r-x/r-x 
+    0x00100486000-0x0010048a000       16K prot r--/rw- 
+    0x0010048a000-0x00100490000       24K prot r--/r-- 
+    0x00100490000-0x00100492000        8K prot r--/r-- 
+    0x00100492000-0x00100496000       16K prot r--/r-- 
+    0x00100496000-0x0010049a000       16K prot r--/r-- 
+    0x0010049a000-0x0010049e000       16K prot r--/r-- 
+    0x0010049e000-0x001004a0000        8K prot rw-/rwx 
+    0x001004a0000-0x001004a8000       32K prot r--/r-- 
+    0x001006d7000-0x00100748000      452K prot ---/--- 
+    0x00100748000-0x0010074b000       12K prot ---/--- 
+    0x0010074b000-0x0010081b000      832K prot ---/--- 
+    0x0010081b000-0x001008bc000      644K prot rw-/rwx 
+    ... 32 regions total in range
+  reserve mmap(0x1000, 0xFFFFF000, PROT_NONE, FIXED|NORESERVE) -> ok errno 0
+  [after reserve, below 8 GiB] regions in [0x0, 0x200000000):
+    0x00000001000-0x00008001000   131072K prot ---/rwx 
+    0x00008001000-0x00010001000   131072K prot ---/rwx 
+    0x00010001000-0x00018001000   131072K prot ---/rwx 
+    0x00018001000-0x00020001000   131072K prot ---/rwx 
+    0x00020001000-0x00028001000   131072K prot ---/rwx 
+    0x00028001000-0x00030001000   131072K prot ---/rwx 
+    0x00030001000-0x00038001000   131072K prot ---/rwx 
+    0x00038001000-0x00040001000   131072K prot ---/rwx 
+    0x00040001000-0x00048001000   131072K prot ---/rwx 
+    0x00048001000-0x00050001000   131072K prot ---/rwx 
+    0x00050001000-0x00058001000   131072K prot ---/rwx 
+    0x00058001000-0x00060001000   131072K prot ---/rwx 
+    0x00060001000-0x00068001000   131072K prot ---/rwx 
+    0x00068001000-0x00070001000   131072K prot ---/rwx 
+    ... 64 regions total in range
+  dlopen /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation       ok
+  dlopen /System/Library/Frameworks/Metal.framework/Metal                         ok
+  dlopen /System/Library/Frameworks/CoreAudio.framework/CoreAudio                 ok
+  dlopen /System/Library/Frameworks/AppKit.framework/AppKit                       ok
+  dlopen /usr/lib/libz.dylib                                                      ok
+  dlopen /opt/homebrew/opt/freetype/lib/libfreetype.6.dylib                       ok
+  dlopen /opt/homebrew/opt/gnutls/lib/libgnutls.30.dylib                          ok
+  after hammering (4000 NULL-hint mmaps, 512MiB malloc, 8 threads, 7 dlopens): allocations below 4 GiB = 0, lowest address seen 0x1004a8000
+  carve: 0x10000000 ok, 0x7ffe0000 ok, 0xfffe0000 ok, 0x1000 ok
+  munmap of carved area -> 0 (hole now returns to the process; a re-reserve step is needed after munmap)
+spawn[4k] child exit=0
+### emul_pz10000 (4k)
+lowres: pid 64187 pagesize 4096 min_address 0x1000 image at 0x46a1000
+  dyld shared cache: 0x1955d0000 + 0x1cb0f8000 (end 0x3606c8000)
+  [at start, below 8 GiB] regions in [0x0, 0x200000000):
+    0x00000001000-0x000046a1000    72320K prot ---/--- 
+    0x000046a1000-0x000046a5000       16K prot r-x/r-x 
+    0x000046a5000-0x000046a9000       16K prot r--/rw- 
+    0x000046a9000-0x000046af000       24K prot r--/r-- 
+    0x000046af000-0x000046b1000        8K prot r--/r-- 
+    0x000046b1000-0x000046b5000       16K prot r--/r-- 
+    0x000046b5000-0x000046b9000       16K prot r--/r-- 
+    0x000046b9000-0x000046bd000       16K prot r--/r-- 
+    0x000046bd000-0x000046bf000        8K prot rw-/rwx 
+    0x000046bf000-0x000046c7000       32K prot r--/r-- 
+    0x00004935000-0x000049a6000      452K prot ---/--- 
+    0x000049a6000-0x000049a9000       12K prot ---/--- 
+    0x000049a9000-0x00004aec000     1292K prot ---/--- 
+    0x00004aec000-0x00004b8d000      644K prot rw-/rwx 
+    ... 32 regions total in range
+  reserve mmap(0x1000, 0xFFFFF000, PROT_NONE, FIXED|NORESERVE) -> FAIL errno 13
+  hole walk reserved 4 holes, 0xf6ffe000 bytes
+  [after reserve, below 8 GiB] regions in [0x0, 0x200000000):
+    0x00000001000-0x000046a1000    72320K prot ---/--- 
+    0x000046a1000-0x000046a5000       16K prot r-x/r-x 
+    0x000046a5000-0x000046a9000       16K prot r--/rw- 
+    0x000046a9000-0x000046af000       24K prot r--/r-- 
+    0x000046af000-0x000046b1000        8K prot r--/r-- 
+    0x000046b1000-0x000046b5000       16K prot r--/r-- 
+    0x000046b5000-0x000046b9000       16K prot r--/r-- 
+    0x000046b9000-0x000046bd000       16K prot r--/r-- 
+    0x000046bd000-0x000046bf000        8K prot rw-/rwx 
+    0x000046bf000-0x000046c7000       32K prot r--/r-- 
+    0x000046c7000-0x00004935000     2488K prot ---/rwx 
+    0x00004935000-0x000049a6000      452K prot ---/--- 
+    0x000049a6000-0x000049a9000       12K prot ---/--- 
+    0x000049a9000-0x00004aec000     1292K prot ---/--- 
+    ... 66 regions total in range
+  dlopen /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation       ok
+  dlopen /System/Library/Frameworks/Metal.framework/Metal                         ok
+  dlopen /System/Library/Frameworks/CoreAudio.framework/CoreAudio                 ok
+  dlopen /System/Library/Frameworks/AppKit.framework/AppKit                       ok
+  dlopen /usr/lib/libz.dylib                                                      ok
+  dlopen /opt/homebrew/opt/freetype/lib/libfreetype.6.dylib                       ok
+  dlopen /opt/homebrew/opt/gnutls/lib/libgnutls.30.dylib                          ok
+  after hammering (4000 NULL-hint mmaps, 512MiB malloc, 8 threads, 7 dlopens): allocations below 4 GiB = 1, lowest address seen 0x100000000
+  carve: 0x10000000 ok, 0x7ffe0000 ok, 0xfffe0000 ok, 0x1000 ok
+  munmap of carved area -> 0 (hole now returns to the process; a re-reserve step is needed after munmap)
+spawn[4k] child exit=0
+### emul_pz1000 (4k)
+spawn[4k] child killed by signal 10
