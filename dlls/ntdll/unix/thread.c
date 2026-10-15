@@ -2800,6 +2800,6 @@ NTSTATUS WINAPI NtGetNextThread( HANDLE process, HANDLE thread, ACCESS_MASK acce
     }
     SERVER_END_REQ;
 
-    *handle = ret_handle;
+    if (!ret) *handle = ret_handle;
     return ret;
 }
