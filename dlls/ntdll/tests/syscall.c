@@ -49,6 +49,8 @@
 #define WIN10_19045_NtWaitForSingleObject 0x0004
 /* NtWaitLowEventPair on Windows 10 build 19045 (x86-64) - highest number in the 19045 table */
 #define WIN10_19045_NtWaitLowEventPair 0x01d8
+/* NtProtectVirtualMemory on Windows 10 build 19045 (x86-64) */
+#define WIN10_19045_NtProtectVirtualMemory 0x0050
 static NTSTATUS (WINAPI *pNtGetNlsSectionPtr)(ULONG, ULONG, void *, void **, SIZE_T *);
 static NTSTATUS (WINAPI *pNtWaitForSingleObject)(HANDLE, BOOLEAN, const LARGE_INTEGER *);
 static NTSTATUS (WINAPI *pZwSetThreadExecutionState)(EXECUTION_STATE, EXECUTION_STATE *);
@@ -847,6 +849,135 @@ static void eaac_corrupt_child( unsigned int variant )
     VirtualFree( page, 0, MEM_RELEASE );
 }
 
+/* The patch makes the stub pages writable and must put each one back to the
+ * protection it had, not to a blanket r-x.  PAGE_READWRITE is the one state
+ * the guest can pick that discriminates: an executable page would be
+ * repaired by virtual_handle_fault on a write fault, but a page that is not
+ * executable and writable is not.
+ *
+ * The page is ntdll stub memory, and it is not executable between the two
+ * protection changes.  That window holds only the trigger and one write, with
+ * no ok() output, and the exception dispatch it contains runs these entries,
+ * so the page is chosen at run time to hold none of them (nor the end of
+ * their cell).  Both protection changes go through a raw syscall instead of
+ * the NtProtectVirtualMemory stub, whose own ret would fault if it were on
+ * the page.
+ * NtAlertThreadByThreadId may share the chosen page: a critical section contended by another
+ * thread during the window would fault in its wake path, so this child must stay
+ * single-threaded. */
+static const char *const eaac_dispatch_stubs[] =
+{
+    "NtContinue", "NtRaiseException", "KiUserExceptionDispatcher"
+};
+
+#define EAAC_STR_(x) #x
+#define EAAC_STR(x) EAAC_STR_(x)
+
+extern ULONG64 WINAPI raw_protect_virtual_memory( HANDLE, void **, SIZE_T *, ULONG, ULONG * );
+__ASM_GLOBAL_FUNC( raw_protect_virtual_memory,
+                   __ASM_SEH(".seh_endprologue\n\t")
+                   "movq %rcx,%r10\n\t"
+                   "movl $" EAAC_STR(WIN10_19045_NtProtectVirtualMemory) ",%eax\n\t"
+                   "syscall\n\t"
+                   "ret" );
+
+static ULONG64 eaac_raw_protect( void *addr, ULONG prot, ULONG *old )
+{
+    SIZE_T size = 0x1000;
+
+    return raw_protect_virtual_memory( GetCurrentProcess(), &addr, &size, prot, old );
+}
+
+#define EAAC_PAGE(addr) ((ULONG_PTR)(addr) & ~(ULONG_PTR)0xfff)
+
+/* is the page of addr, or of the last byte of its 32-byte cell, one that
+ * holds an exception dispatch entry? */
+static BOOL eaac_page_has_dispatch_entry( HMODULE ntdll, const BYTE *addr )
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(eaac_dispatch_stubs); i++)
+    {
+        const BYTE *entry = (const BYTE *)GetProcAddress( ntdll, eaac_dispatch_stubs[i] );
+
+        if (!entry) return TRUE;  /* cannot tell: fail closed */
+        if (EAAC_PAGE(entry) == EAAC_PAGE(addr) || EAAC_PAGE(entry + 31) == EAAC_PAGE(addr) ||
+            EAAC_PAGE(entry) == EAAC_PAGE(addr + 31) || EAAC_PAGE(entry + 31) == EAAC_PAGE(addr + 31))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* a patched syscall stub whose pages hold no exception dispatch entry */
+static const BYTE *eaac_find_quiet_stub( HMODULE ntdll )
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(windows_syscalls_WIN10_19045); i++)
+    {
+        const BYTE *stub = (const BYTE *)GetProcAddress( ntdll, windows_syscalls_WIN10_19045[i].name );
+
+        /* only wine's own stubs are patched, and they start like the Windows ones */
+        if (!stub || memcmp( stub, eaac_win_prefix, sizeof(eaac_win_prefix) )) continue;
+        if (!eaac_page_has_dispatch_entry( ntdll, stub )) return stub;
+    }
+    return NULL;
+}
+
+static void eaac_page_prot_child(void)
+{
+    HMODULE ntdll = GetModuleHandleW( L"ntdll.dll" );
+    const BYTE *stub = eaac_find_quiet_stub( ntdll );
+    const BYTE *rx_stub = (const BYTE *)GetProcAddress( ntdll, "NtContinue" );
+    BYTE *stub_page = (BYTE *)EAAC_PAGE(stub);
+    MEMORY_BASIC_INFORMATION info = { 0 };
+    DWORD trigger_exception = 0, write_exception = 0, rx_exception = 0, tmp;
+    ULONG64 protect_status, restore_status = ~0ull;
+    ULONG old = 0, prev;
+    BYTE *page;
+
+    ok( stub != NULL, "no syscall stub page without an exception dispatch entry\n" );
+    ok( rx_stub != NULL, "NtContinue not found\n" );
+    if (!stub || !rx_stub) return;
+    ok( memcmp( stub + 8, eaac_win_tail, sizeof(eaac_win_tail) ), "the stub is already patched\n" );
+
+    page = VirtualAlloc( NULL, 0x1000, MEM_COMMIT, PAGE_READWRITE );
+    ok( page != NULL, "VirtualAlloc failed\n" );
+    if (!page) return;
+    page[0] = 0xc3;
+    ok( VirtualProtect( page, 0x1000, PAGE_READONLY, &tmp ), "VirtualProtect failed\n" );
+
+    protect_status = eaac_raw_protect( stub_page, PAGE_READWRITE, &old );
+    if (protect_status == STATUS_SUCCESS)
+    {
+        trigger_exception = eaac_call_nonexecutable_page( page );
+        /* write back the byte already there: the page must still be writable */
+        __try { *(volatile BYTE *)stub_page = *(volatile BYTE *)stub_page; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { write_exception = GetExceptionCode(); }
+        restore_status = eaac_raw_protect( stub_page, old, &prev );
+    }
+    ok( protect_status == STATUS_SUCCESS, "making the stub page PAGE_READWRITE returned %s\n",
+        wine_dbgstr_longlong( protect_status ) );
+    ok( restore_status == STATUS_SUCCESS, "restoring the stub page protection returned %s\n",
+        wine_dbgstr_longlong( restore_status ) );
+    ok( trigger_exception == STATUS_ACCESS_VIOLATION, "the page did not fault: %08lx\n", trigger_exception );
+    ok( !write_exception, "writing the PAGE_READWRITE stub page after the patch raised %08lx\n", write_exception );
+    ok( VirtualQuery( stub_page, &info, sizeof(info) ) && info.Protect == old,
+        "the raw restore left the stub page at protection %#lx, expected %#lx\n", info.Protect, old );
+    ok( !memcmp( stub, eaac_win_prefix, sizeof(eaac_win_prefix) ) &&
+        !memcmp( stub + 8, eaac_win_tail, sizeof(eaac_win_tail) ),
+        "the stub was not patched to the Windows stub\n" );
+
+    /* an ordinary r-x stub page that the patch also visited (NtContinue's, which
+     * is never the page above) must not have been left writable.  virtual.c
+     * tracks it as r-x, so nothing repairs a write fault on it, and the page is
+     * still executable, so the fault dispatch can run */
+    __try { *(volatile BYTE *)EAAC_PAGE(rx_stub) = *(volatile BYTE *)EAAC_PAGE(rx_stub); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { rx_exception = GetExceptionCode(); }
+    ok( rx_exception == STATUS_ACCESS_VIOLATION, "an r-x stub page was left writable: %08lx\n", rx_exception );
+    VirtualFree( page, 0, MEM_RELEASE );
+}
+
 /* The Zw stub patch only fires in a process whose image file name is
  * EAAntiCheat.GameService.exe, or is listed in WINE_EAAC_PATCH_EXES (a
  * ';'-separated list of file names).  The patch is one-shot per process and
@@ -929,6 +1060,12 @@ static void test_eaac_corrupt_exports( void )
         eaac_run_child( EAAC_GATE_EXE, args, NULL );
         winetest_pop_context();
     }
+}
+
+/* the patch must leave the protection of a stub page as the guest set it */
+static void test_eaac_stub_page_protection( void )
+{
+    eaac_run_child( EAAC_GATE_EXE, "eaac_page_prot", NULL );
 }
 
 /* a process outside the gate takes the same execute fault on a read-only
@@ -1077,6 +1214,11 @@ START_TEST(syscall)
         eaac_corrupt_child( atoi( argv[3] ) );
         return;
     }
+    if (argc >= 3 && !strcmp( argv[2], "eaac_page_prot" ))
+    {
+        eaac_page_prot_child();
+        return;
+    }
     if (argc >= 3 && (!strcmp( argv[2], "eaac_patched" ) || !strcmp( argv[2], "eaac_unpatched" )))
     {
         const char *name = strrchr( argv[0], '\\' );
@@ -1106,5 +1248,6 @@ START_TEST(syscall)
     test_raw_syscall_register_semantics();
     test_eaac_process_gate();
     test_eaac_corrupt_exports();
+    test_eaac_stub_page_protection();
 #endif
 }

@@ -3016,26 +3016,90 @@ __ASM_GLOBAL_FUNC( write_windows_stub_image,
                    "movq %rax,(%rdi)\n\t"
                    "ret" );
 
-/* Make the target pages writable, write the full stub cell, and restore RX.
- * The page size is the host page size cached at init (sysconf is not
- * async-signal-safe); the patch is disabled unless it matches the 4 KiB
- * granularity virtual.c tracks. */
+/* Read the current host protection of one page, as PROT_* bits.  mach_vm_region
+ * returns the next mapped region when the address is unmapped and updates the
+ * address in place, so the result only counts if the returned region really
+ * contains the page.  Nothing here locks or allocates. */
+static BOOL eaac_query_page_prot( ULONG64 page, int *prot )
+{
+#ifdef __APPLE__
+    mach_vm_address_t addr = page;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;  /* VM_REGION_BASIC_INFO_64 returns a null object port */
+
+    if (mach_vm_region( mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64,
+                        (vm_region_info_t)&info, &count, &obj ) != KERN_SUCCESS) return FALSE;
+    if (addr > page || page - addr >= size) return FALSE;
+    *prot = 0;
+    if (info.protection & VM_PROT_READ) *prot |= PROT_READ;
+    if (info.protection & VM_PROT_WRITE) *prot |= PROT_WRITE;
+    if (info.protection & VM_PROT_EXECUTE) *prot |= PROT_EXEC;
+    return TRUE;
+#else
+    return FALSE;
+#endif
+}
+
+/* Make the target pages writable, write the full stub cell, and put every page
+ * back to the protection it had before.  The page size is the host page size
+ * cached at init (sysconf is not async-signal-safe); the patch is disabled
+ * unless it matches the 4 KiB granularity virtual.c tracks.  A page keeps the
+ * rights it had (other threads may be executing in it) and only gains write.
+ * If any protection cannot be read or changed, nothing is written.  The read
+ * and the restore are not atomic with virtual.c: a concurrent
+ * NtProtectVirtualMemory on the same page between them is undone. */
 static BOOL write_windows_stub( BYTE *addr, unsigned int nr )
 {
-    ULONG64 first, last, len;
+    ULONG64 first, last;
+    int orig[2];
+    unsigned int i, count;
 
-    /* the ntdll code pages are r-x; flip to write, patch, restore */
     first = (ULONG64)addr & ~(eaac_page_size - 1);
     last = ((ULONG64)addr + EAAC_STUB_CELL_SIZE - 1) & ~(eaac_page_size - 1);
-    len = last - first + eaac_page_size;
-    if (mprotect( (void *)first, len, PROT_READ | PROT_WRITE | PROT_EXEC ))
+    count = (last - first) / eaac_page_size + 1;
+    if (count > ARRAY_SIZE(orig)) return FALSE;  /* cannot happen: the cell is 32 bytes */
+
+    /* the pages of a cell can lie in different regions: query each one */
+    for (i = 0; i < count; i++)
     {
-        ERR_(seh)( "stub patch: mprotect failed at %p\n", addr );
-        return FALSE;
+        if (!eaac_query_page_prot( first + i * eaac_page_size, &orig[i] ))
+        {
+            ERR_(seh)( "stub patch: cannot read the protection of page %#llx\n",
+                       (unsigned long long)(first + i * eaac_page_size) );
+            return FALSE;
+        }
     }
+
+    for (i = 0; i < count; i++)
+    {
+        if (orig[i] & PROT_WRITE) continue;
+        if (mprotect( (void *)(first + i * eaac_page_size), eaac_page_size, orig[i] | PROT_WRITE ))
+        {
+            ERR_(seh)( "stub patch: mprotect failed at page %#llx\n",
+                       (unsigned long long)(first + i * eaac_page_size) );
+            /* the pages before this one were made writable: put them back */
+            while (i--)
+            {
+                if (orig[i] & PROT_WRITE) continue;
+                if (mprotect( (void *)(first + i * eaac_page_size), eaac_page_size, orig[i] ))
+                    ERR_(seh)( "stub patch: restore mprotect failed at page %#llx\n",
+                               (unsigned long long)(first + i * eaac_page_size) );
+            }
+            return FALSE;
+        }
+    }
+
     write_windows_stub_image( addr, nr );
-    if (mprotect( (void *)first, len, PROT_READ | PROT_EXEC ))
-        ERR_(seh)( "stub patch: restore mprotect failed at %p\n", addr );
+
+    for (i = 0; i < count; i++)
+    {
+        if (orig[i] & PROT_WRITE) continue;
+        if (mprotect( (void *)(first + i * eaac_page_size), eaac_page_size, orig[i] ))
+            ERR_(seh)( "stub patch: restore mprotect failed at page %#llx\n",
+                       (unsigned long long)(first + i * eaac_page_size) );
+    }
     return TRUE;
 }
 
@@ -3047,12 +3111,8 @@ static BOOL is_execute_fault_on_readable_page( int signal, siginfo_t *siginfo,
                                                ucontext_t *ucontext )
 {
 #ifdef __APPLE__
-    mach_vm_address_t raddr;
-    mach_vm_size_t rsize;
-    vm_region_basic_info_data_64_t info;
-    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t obj = MACH_PORT_NULL;
     ULONG64 rip = RIP_sig( ucontext );
+    int prot;
 
     if (signal != SIGSEGV && signal != SIGBUS) return FALSE;
     /* an instruction fetch on a protected page; macOS reports it as
@@ -3060,10 +3120,8 @@ static BOOL is_execute_fault_on_readable_page( int signal, siginfo_t *siginfo,
     if (!siginfo || (siginfo->si_code != SEGV_ACCERR && siginfo->si_code != BUS_ADRERR)) return FALSE;
     if ((ULONG64)siginfo->si_addr != rip &&
         ((ULONG64)siginfo->si_addr & ~(eaac_page_size - 1)) != (rip & ~(eaac_page_size - 1))) return FALSE;
-    raddr = rip & ~(eaac_page_size - 1);
-    if (mach_vm_region( mach_task_self(), &raddr, &rsize, VM_REGION_BASIC_INFO_64,
-                        (vm_region_info_t)&info, &count, &obj ) != KERN_SUCCESS) return FALSE;
-    return (info.protection & VM_PROT_READ) && !(info.protection & VM_PROT_EXECUTE);
+    if (!eaac_query_page_prot( rip & ~(eaac_page_size - 1), &prot )) return FALSE;
+    return (prot & PROT_READ) && !(prot & PROT_EXEC);
 #else
     return FALSE;
 #endif
