@@ -294,11 +294,14 @@ static NTSTATUS raw_syscall_probe( unsigned int nr, ULONG_PTR arg1, ULONG_PTR ar
              "movq %%rsi, %[expr]\n\t"
              "pushfq\n\t"
              "popq %[after]\n\t"
+             "pushfq\n\t"               /* the C ABI needs DF clear, and no stray AC */
+             "andq $~0x40400, (%%rsp)\n\t"
+             "popfq\n\t"
              "addq $0x28, %%rsp\n\t"
              : [out] "=a"(status), [r11] "=r"(r11), [rcxo] "=r"(rcx_out), [after] "=r"(after), [expr] "=r"(exp_rip)
              : [nr] "g"(nr), [a1] "g"(arg1), [a2] "g"(arg2), [a3] "g"(arg3),
                [a4] "g"(arg4), [a5] "g"(arg5), [sf] "r"(set_flags)
-             : "rcx", "rdx", "r8", "r9", "r10", "rsi", "memory" );
+             : "rcx", "rdx", "r8", "r9", "r10", "r11", "rsi", "memory" );
     *ret_rcx = rcx_out;
     *ret_r11 = r11;
     *post_flags = after;
