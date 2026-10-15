@@ -2902,6 +2902,14 @@ static const char eaac_patch_builtin_exes[] = "EAAntiCheat.GameService.exe";
 static char *eaac_patch_env_exes;  /* private copy of WINE_EAAC_PATCH_EXES */
 static BOOL eaac_patch_enabled;    /* default closed, set by eaac_patch_init_gate */
 
+/* Host page size for the patch path, cached by eaac_init_page_size: sysconf()
+ * is not async-signal-safe, so the handler only reads these.  The patch stays
+ * disabled unless the page size matches the 4 KiB granularity virtual.c tracks. */
+static UINT_PTR eaac_page_size = 0x1000;
+static BOOL eaac_page_size_ok;     /* default closed, set by eaac_init_page_size */
+
+#define EAAC_STUB_CELL_SIZE 32
+
 /* Called early from hacks_init, before any signal handler is installed.
  * Keeps a copy: the caller's string points into environ. */
 void eaac_patch_init_env( const char *exes )
@@ -2944,6 +2952,25 @@ static BOOL eaac_name_in_list( const WCHAR *name, size_t len, const char *list )
     return FALSE;
 }
 
+/* Taken once, before the handlers exist.  Mprotecting a host page larger than
+ * wine's 4 KiB page_size would change the protections of neighbouring pages
+ * that virtual.c tracks individually, so any other size fails closed. */
+static void eaac_init_page_size(void)
+{
+    long size = sysconf( _SC_PAGESIZE );
+
+    eaac_page_size_ok = FALSE;
+    if (size < 0x1000 || (size & (size - 1)) || (SIZE_T)size != page_size)
+    {
+        ERR_(seh)( "host page size %#lx differs from wine's %#lx, Zw stub patch disabled\n",
+                   (unsigned long)size, (unsigned long)page_size );
+        return;
+    }
+    eaac_page_size = size;
+    eaac_page_size_ok = TRUE;
+    TRACE_(seh)( "Zw stub patch page size %#lx\n", (unsigned long)eaac_page_size );
+}
+
 /* Taken once, before the handlers exist; closed if the process parameters are
  * missing.  No locks and no allocation, as is_quickenpatch. */
 static void eaac_patch_init_gate(void)
@@ -2953,6 +2980,7 @@ static void eaac_patch_init_gate(void)
     size_t len, i;
 
     eaac_patch_enabled = FALSE;
+    if (!eaac_page_size_ok) return;
     if (!params || !(path = params->ImagePathName.Buffer) || !params->ImagePathName.Length) return;
     len = params->ImagePathName.Length / sizeof(WCHAR);
 
@@ -2988,21 +3016,25 @@ __ASM_GLOBAL_FUNC( write_windows_stub_image,
                    "movq %rax,(%rdi)\n\t"
                    "ret" );
 
-/* Make the target pages writable, write the full stub cell, and restore RX. */
+/* Make the target pages writable, write the full stub cell, and restore RX.
+ * The page size is the host page size cached at init (sysconf is not
+ * async-signal-safe); the patch is disabled unless it matches the 4 KiB
+ * granularity virtual.c tracks. */
 static BOOL write_windows_stub( BYTE *addr, unsigned int nr )
 {
-    ULONG64 first, last;
+    ULONG64 first, last, len;
 
     /* the ntdll code pages are r-x; flip to write, patch, restore */
-    first = (ULONG64)addr & ~0xfff;
-    last = ((ULONG64)addr + 31) & ~0xfff;
-    if (mprotect( (void *)first, last - first + 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC ))
+    first = (ULONG64)addr & ~(eaac_page_size - 1);
+    last = ((ULONG64)addr + EAAC_STUB_CELL_SIZE - 1) & ~(eaac_page_size - 1);
+    len = last - first + eaac_page_size;
+    if (mprotect( (void *)first, len, PROT_READ | PROT_WRITE | PROT_EXEC ))
     {
         ERR_(seh)( "stub patch: mprotect failed at %p\n", addr );
         return FALSE;
     }
     write_windows_stub_image( addr, nr );
-    if (mprotect( (void *)first, last - first + 0x1000, PROT_READ | PROT_EXEC ))
+    if (mprotect( (void *)first, len, PROT_READ | PROT_EXEC ))
         ERR_(seh)( "stub patch: restore mprotect failed at %p\n", addr );
     return TRUE;
 }
@@ -3027,8 +3059,8 @@ static BOOL is_execute_fault_on_readable_page( int signal, siginfo_t *siginfo,
      * SEGV_ACCERR, or as BUS_ADRERR in some paths */
     if (!siginfo || (siginfo->si_code != SEGV_ACCERR && siginfo->si_code != BUS_ADRERR)) return FALSE;
     if ((ULONG64)siginfo->si_addr != rip &&
-        ((ULONG64)siginfo->si_addr & ~0xfffULL) != (rip & ~0xfffULL)) return FALSE;
-    raddr = rip & ~0xfffULL;
+        ((ULONG64)siginfo->si_addr & ~(eaac_page_size - 1)) != (rip & ~(eaac_page_size - 1))) return FALSE;
+    raddr = rip & ~(eaac_page_size - 1);
     if (mach_vm_region( mach_task_self(), &raddr, &rsize, VM_REGION_BASIC_INFO_64,
                         (vm_region_info_t)&info, &count, &obj ) != KERN_SUCCESS) return FALSE;
     return (info.protection & VM_PROT_READ) && !(info.protection & VM_PROT_EXECUTE);
@@ -3791,6 +3823,7 @@ void signal_init_process(void)
 
     /* the process parameters exist (init_startup_info ran), and no signal
      * handler is installed yet */
+    eaac_init_page_size();
     eaac_patch_init_gate();
 
     if (user_shared_data->XState.Size) xstate_size = user_shared_data->XState.Size - sizeof(XSAVE_FORMAT);
