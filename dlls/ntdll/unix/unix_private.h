@@ -762,6 +762,7 @@ extern unsigned int wine_syscall_id_for_windows_nr( unsigned int nr );
 extern ULONG64 get_wine_syscall_stub_address( const char *name );
 extern BOOL is_patched_stub_address( ULONG64 addr );
 extern unsigned int eaac_patch_windows_zw_stubs( BOOL (*write_stub)( BYTE *addr, unsigned int nr ) );
+extern void eaac_patch_init_env( const char *exes );
 
 #endif  /* defined(__x86_64__) */
 

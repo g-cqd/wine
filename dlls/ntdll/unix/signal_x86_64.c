@@ -2871,6 +2871,85 @@ static volatile BOOL eaac_stubs_patched;
 static volatile BOOL eaac_patch_done;
 static unsigned int eaac_xlat_fail_logged;
 
+/* The patch fires only in the EA anti-cheat GameService process, identified by
+ * the file name of the process image.  The decision is taken once, in
+ * signal_init_process(), and cached: the signal handler only reads the flag.
+ * The built-in list holds the GameService alone.  The installer is
+ * deliberately not on it: the preloader self-check this exists for runs in
+ * the GameService.  WINE_EAAC_PATCH_EXES (a ';'-separated list of file names)
+ * adds more names.  Entries are not whitespace-trimmed, entries with a path
+ * never match, and non-ASCII names never match. */
+static const char eaac_patch_builtin_exes[] = "EAAntiCheat.GameService.exe";
+static char *eaac_patch_env_exes;  /* private copy of WINE_EAAC_PATCH_EXES */
+static BOOL eaac_patch_enabled;    /* default closed, set by eaac_patch_init_gate */
+
+/* Called early from hacks_init, before any signal handler is installed.
+ * Keeps a copy: the caller's string points into environ. */
+void eaac_patch_init_env( const char *exes )
+{
+    if (exes && *exes) eaac_patch_env_exes = strdup( exes );
+}
+
+/* whole-name, ASCII case-insensitive comparison of name[0..len) with a
+ * list entry of entry_len bytes */
+static BOOL eaac_name_equals( const WCHAR *name, size_t len, const char *entry, size_t entry_len )
+{
+    size_t i;
+
+    if (!entry_len || len != entry_len) return FALSE;
+    for (i = 0; i < len; i++)
+    {
+        WCHAR a = name[i];
+        unsigned char b = entry[i];
+
+        if (b >= 0x80 || a >= 0x80) return FALSE;
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        if (a != b) return FALSE;
+    }
+    return TRUE;
+}
+
+/* is name[0..len) one of the entries of a ';'-separated list?  Empty entries
+ * are ignored. */
+static BOOL eaac_name_in_list( const WCHAR *name, size_t len, const char *list )
+{
+    while (*list)
+    {
+        size_t entry_len = strcspn( list, ";" );
+
+        if (eaac_name_equals( name, len, list, entry_len )) return TRUE;
+        list += entry_len;
+        if (*list == ';') list++;
+    }
+    return FALSE;
+}
+
+/* Taken once, before the handlers exist; closed if the process parameters are
+ * missing.  No locks and no allocation, as is_quickenpatch. */
+static void eaac_patch_init_gate(void)
+{
+    const RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
+    const WCHAR *path, *name;
+    size_t len, i;
+
+    eaac_patch_enabled = FALSE;
+    if (!params || !(path = params->ImagePathName.Buffer) || !params->ImagePathName.Length) return;
+    len = params->ImagePathName.Length / sizeof(WCHAR);
+
+    /* the file name is what follows the last separator */
+    name = path;
+    for (i = 0; i < len; i++)
+        if (path[i] == '\\' || path[i] == '/') name = path + i + 1;
+    len -= name - path;
+
+    eaac_patch_enabled = eaac_name_in_list( name, len, eaac_patch_builtin_exes ) ||
+                         (eaac_patch_env_exes && eaac_name_in_list( name, len, eaac_patch_env_exes ));
+
+    TRACE_(seh)( "Zw stub patch %s for image %s\n", eaac_patch_enabled ? "enabled" : "disabled",
+                 debugstr_wn( name, len ) );
+}
+
 /* Write the canonical 32-byte Windows stub image without an intermediate buffer.
  * The tail (offsets 24, 16, 8) is written first, and the 8-byte opcode/syscall
  * header is committed last with a single aligned 64-bit store so concurrent
@@ -2965,7 +3044,8 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     /* the anti-cheat preloader announces itself with an execute fault on
      * a read-only page; patch the fingerprinted Zw stubs before its
      * decision code can read them */
-    if (!eaac_patch_done && is_execute_fault_on_readable_page( signal, siginfo, ucontext ))
+    if (eaac_patch_enabled && !eaac_patch_done &&
+        is_execute_fault_on_readable_page( signal, siginfo, ucontext ))
     {
         if (!__sync_lock_test_and_set( &eaac_stubs_patched, 1 ))
         {
@@ -3671,6 +3751,10 @@ void signal_init_process(void)
     WOW_TEB *wow_teb = get_wow_teb( NtCurrentTeb() );
     struct ntdll_thread_data *thread_data = ntdll_get_thread_data();
     void *ptr, *kernel_stack = (char *)thread_data->kernel_stack + kernel_stack_size;
+
+    /* the process parameters exist (init_startup_info ran), and no signal
+     * handler is installed yet */
+    eaac_patch_init_gate();
 
     if (user_shared_data->XState.Size) xstate_size = user_shared_data->XState.Size - sizeof(XSAVE_FORMAT);
     frame_size = offsetof( struct syscall_frame, xstate ) + xstate_size;

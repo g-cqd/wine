@@ -587,6 +587,15 @@ static void test_raw_syscall_number_boundaries( void )
         wine_dbgstr_longlong( raw ) );
 }
 
+/* the Zw stubs the gate and corruption tests inspect, and the Windows stub's
+ * leading bytes */
+static const char *const eaac_stub_names[] = { "ZwSetThreadExecutionState", "ZwClose", "NtAccessCheck" };
+static const BYTE eaac_win_prefix[4] = { 0x4c, 0x8b, 0xd1, 0xb8 };
+/* offsets 8..22 of the Windows stub; wine's own stub shares the first 21 bytes
+ * and differs at the int 0x2e (wine has "jmp +1; ret" there) */
+static const BYTE eaac_win_tail[15] = { 0xf6, 0x04, 0x25, 0x08, 0x03, 0xfe, 0x7f, 0x01,
+                                   0x75, 0x03, 0x0f, 0x05, 0xc3, 0xcd, 0x2e };
+
 /* The unix side walks ntdll's export table in guest-writable memory from the
  * signal handler that applies the EA anti-cheat Zw stub patch.  A corrupted
  * header or export directory must make the lookup fail closed: no patch and
@@ -690,20 +699,17 @@ static LONG CALLBACK eaac_restore_handler( EXCEPTION_POINTERS *info )
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-static void eaac_call_nonexecutable_page( void *page )
+static DWORD eaac_call_nonexecutable_page( void *page )
 {
+    DWORD exception = 0;
+
     __try { ((void (*)(void))page)(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __except (EXCEPTION_EXECUTE_HANDLER) { exception = GetExceptionCode(); }
+    return exception;
 }
 
 static void eaac_corrupt_child( unsigned int variant )
 {
-    static const char *const stub_names[] = { "ZwSetThreadExecutionState", "ZwClose", "NtAccessCheck" };
-    static const BYTE win_prefix[4] = { 0x4c, 0x8b, 0xd1, 0xb8 };
-    /* offsets 8..22 of the Windows stub; wine's own stub shares the first 21 bytes
-     * and differs at the int 0x2e (wine has "jmp +1; ret" there) */
-    static const BYTE win_tail[15] = { 0xf6, 0x04, 0x25, 0x08, 0x03, 0xfe, 0x7f, 0x01,
-                                       0x75, 0x03, 0x0f, 0x05, 0xc3, 0xcd, 0x2e };
     BYTE *base = (BYTE *)GetModuleHandleW( L"ntdll.dll" );
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
     IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
@@ -716,10 +722,10 @@ static void eaac_corrupt_child( unsigned int variant )
     struct guest_range hdr = {0}, dir_range = {0}, table = {0}, cell = {0};
     BYTE fake_cell[31] = { 0 };
     SIZE_T fake_size = 0;
-    const BYTE *stubs[ARRAY_SIZE(stub_names)];
-    BYTE before[ARRAY_SIZE(stub_names)][32];
+    const BYTE *stubs[ARRAY_SIZE(eaac_stub_names)];
+    BYTE before[ARRAY_SIZE(eaac_stub_names)][32];
     BOOL opened = TRUE;
-    DWORD old_prot;
+    DWORD old_prot, exception;
     void *veh;
     BYTE *page;
     DWORD i;
@@ -727,13 +733,13 @@ static void eaac_corrupt_child( unsigned int variant )
     ok( variant < EAAC_VARIANT_COUNT, "unknown variant %u\n", variant );
     if (variant >= EAAC_VARIANT_COUNT) return;
 
-    for (i = 0; i < ARRAY_SIZE(stub_names); i++)
+    for (i = 0; i < ARRAY_SIZE(eaac_stub_names); i++)
     {
-        stubs[i] = (const BYTE *)GetProcAddress( (HMODULE)base, stub_names[i] );
-        ok( stubs[i] != NULL, "%s not found\n", stub_names[i] );
+        stubs[i] = (const BYTE *)GetProcAddress( (HMODULE)base, eaac_stub_names[i] );
+        ok( stubs[i] != NULL, "%s not found\n", eaac_stub_names[i] );
         if (!stubs[i]) return;
         memcpy( before[i], stubs[i], 32 );
-        ok( memcmp( before[i] + 8, win_tail, sizeof(win_tail) ), "%s is already patched\n", stub_names[i] );
+        ok( memcmp( before[i] + 8, eaac_win_tail, sizeof(eaac_win_tail) ), "%s is already patched\n", eaac_stub_names[i] );
     }
 
     page = VirtualAlloc( NULL, 0x1000, MEM_COMMIT, PAGE_READWRITE );
@@ -774,7 +780,7 @@ static void eaac_corrupt_child( unsigned int variant )
          * last 31 bytes lands on the next page, where write_windows_stub's
          * mprotect fails. */
         fake_size = sizeof(fake_cell);
-        memcpy( fake_cell, win_prefix, sizeof(win_prefix) );
+        memcpy( fake_cell, eaac_win_prefix, sizeof(eaac_win_prefix) );
         opened = guest_range_open( &table, functions, num_functions * sizeof(*functions) ) &&
                  guest_range_open( &cell, base + size - fake_size, fake_size );
         break;
@@ -810,7 +816,8 @@ static void eaac_corrupt_child( unsigned int variant )
             nt->OptionalHeader.NumberOfRvaAndSizes = IMAGE_DIRECTORY_ENTRY_EXPORT;
             break;
         }
-        eaac_call_nonexecutable_page( page );
+        exception = eaac_call_nonexecutable_page( page );
+        ok( exception == STATUS_ACCESS_VIOLATION, "the page did not fault: %08lx\n", exception );
         RemoveVectoredExceptionHandler( veh );
         memset( eaac_restore_ranges, 0, sizeof(eaac_restore_ranges) );
     }
@@ -820,15 +827,15 @@ static void eaac_corrupt_child( unsigned int variant )
      * fake cell; the ranges are closed in reverse order of opening, in case
      * they share a page */
     ok( opened, "could not make the ntdll headers writable\n" );
-    for (i = 0; i < ARRAY_SIZE(stub_names); i++)
+    for (i = 0; i < ARRAY_SIZE(eaac_stub_names); i++)
     {
         if (variant == EAAC_CONTROL)
-            ok( !memcmp( stubs[i], win_prefix, sizeof(win_prefix) ) &&
-                !memcmp( stubs[i] + 8, win_tail, sizeof(win_tail) ),
-                "%s was not patched to the Windows stub\n", stub_names[i] );
+            ok( !memcmp( stubs[i], eaac_win_prefix, sizeof(eaac_win_prefix) ) &&
+                !memcmp( stubs[i] + 8, eaac_win_tail, sizeof(eaac_win_tail) ),
+                "%s was not patched to the Windows stub\n", eaac_stub_names[i] );
         else
             ok( !memcmp( stubs[i], before[i], 32 ), "%s was patched despite the corrupt export table\n",
-                stub_names[i] );
+                eaac_stub_names[i] );
     }
     if (cell.addr)
         ok( !memcmp( cell.addr, fake_cell, fake_size ), "the cell at the end of the image was written\n" );
@@ -840,23 +847,176 @@ static void eaac_corrupt_child( unsigned int variant )
     VirtualFree( page, 0, MEM_RELEASE );
 }
 
-static void test_eaac_corrupt_exports( void )
+/* The Zw stub patch only fires in a process whose image file name is
+ * EAAntiCheat.GameService.exe, or is listed in WINE_EAAC_PATCH_EXES (a
+ * ';'-separated list of file names).  The patch is one-shot per process and
+ * keyed on the image name, so every case runs in a child process started
+ * from a copy of this test exe under the file name being tested.  A Windows
+ * variable only reaches the child's unix environment with the __CX_UNIX_
+ * prefix. */
+#define EAAC_GATE_EXE "EAAntiCheat.GameService.exe"
+#define EAAC_PATCH_EXES_VAR "WINE_EAAC_PATCH_EXES"
+
+/* Run "<exe_name> <test> <args>" from a copy of this exe in a fresh temporary
+ * directory, with the unix variable WINE_EAAC_PATCH_EXES set to patch_exes
+ * (NULL means unset), and wait for it.  Child failures are added to ours.
+ * The Windows variable is always set, to an empty value for NULL: an empty
+ * promoted value unsets the variable in the child, so the environment the
+ * suite was started in cannot open the gate of a case that expects it closed. */
+static void eaac_run_child( const char *exe_name, const char *args, const char *patch_exes )
 {
+    static const char *const unix_var = "__CX_UNIX_" EAAC_PATCH_EXES_VAR;
+    static unsigned int seq;
     STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    char self[MAX_PATH], dir[MAX_PATH], copy[MAX_PATH], cmdline[2 * MAX_PATH + 64];
     char **argv;
-    unsigned int i;
+    DWORD len;
+    int count;
+    BOOL ret;
 
     winetest_get_mainargs( &argv );
+    len = GetModuleFileNameA( NULL, self, sizeof(self) );
+    ok( len && len < sizeof(self), "GetModuleFileName failed, error %lu\n", GetLastError() );
+    if (!len || len >= sizeof(self)) return;
+    len = GetTempPathA( sizeof(dir), dir );
+    ok( len && len < sizeof(dir), "GetTempPath failed, error %lu\n", GetLastError() );
+    if (!len || len >= sizeof(dir)) return;
+    count = snprintf( dir + len, sizeof(dir) - len, "eaac_gate_%04lx_%u", GetCurrentProcessId(), seq++ );
+    ok( count > 0 && count < sizeof(dir) - len, "temporary directory name truncated\n" );
+    if (count <= 0 || count >= sizeof(dir) - len) return;
+    ret = CreateDirectoryA( dir, NULL );
+    ok( ret, "CreateDirectory %s failed, error %lu\n", dir, GetLastError() );
+    if (!ret) return;
+    count = snprintf( copy, sizeof(copy), "%s\\%s", dir, exe_name );
+    ok( count > 0 && count < sizeof(copy), "copy path truncated\n" );
+    ret = count > 0 && count < sizeof(copy) && CopyFileA( self, copy, FALSE );
+    if (count > 0 && count < sizeof(copy))
+        ok( ret, "CopyFile to %s failed, error %lu\n", copy, GetLastError() );
+    if (ret)
+    {
+        count = snprintf( cmdline, sizeof(cmdline), "\"%s\" %s %s", copy, argv[1], args );
+        ok( count > 0 && count < sizeof(cmdline), "command line truncated\n" );
+        if (count > 0 && count < sizeof(cmdline))
+        {
+            ret = SetEnvironmentVariableA( unix_var, patch_exes ? patch_exes : "" );
+            ok( ret, "SetEnvironmentVariable failed, error %lu\n", GetLastError() );
+            ret = CreateProcessA( NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi );
+            SetEnvironmentVariableA( unix_var, NULL );
+            ok( ret, "CreateProcess %s failed, error %lu\n", cmdline, GetLastError() );
+            if (ret) wait_child_process( &pi );
+        }
+        /* after a wait_child_process timeout the child still maps the copy,
+         * so the delete fails and extra failures follow */
+        ret = DeleteFileA( copy );
+        ok( ret, "DeleteFile %s failed, error %lu\n", copy, GetLastError() );
+    }
+    ret = RemoveDirectoryA( dir );
+    ok( ret, "RemoveDirectory %s failed, error %lu\n", dir, GetLastError() );
+}
+
+static void test_eaac_corrupt_exports( void )
+{
+    unsigned int i;
+
+    /* under the gate name, so that the control variant reaches the patch */
     for (i = 0; i < EAAC_VARIANT_COUNT; i++)
     {
-        PROCESS_INFORMATION pi;
-        char cmdline[2 * MAX_PATH];
+        char args[32];
 
         winetest_push_context( "variant %u", i );
-        snprintf( cmdline, sizeof(cmdline), "\"%s\" %s eaac_corrupt %u", argv[0], argv[1], i );
-        if (!CreateProcessA( NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
-            ok( 0, "CreateProcess failed, error %lu\n", GetLastError() );
-        else wait_child_process( &pi );
+        snprintf( args, sizeof(args), "eaac_corrupt %u", i );
+        eaac_run_child( EAAC_GATE_EXE, args, NULL );
+        winetest_pop_context();
+    }
+}
+
+/* a process outside the gate takes the same execute fault on a read-only
+ * page and must keep wine's own Zw stubs */
+static void test_zw_stubs_unpatched( void )
+{
+    HMODULE ntdll = GetModuleHandleW( L"ntdll.dll" );
+    const BYTE *stubs[ARRAY_SIZE(eaac_stub_names)];
+    BYTE before[ARRAY_SIZE(eaac_stub_names)][32];
+    EXECUTION_STATE old;
+    NTSTATUS status;
+    unsigned int i, patched = 0;
+    DWORD old_prot, exception;
+    BYTE *page;
+
+    status = pZwSetThreadExecutionState( ES_CONTINUOUS, &old );
+    ok( status == STATUS_SUCCESS, "ZwSetThreadExecutionState failed before the fault: %08lx\n", status );
+    for (i = 0; i < ARRAY_SIZE(eaac_stub_names); i++)
+    {
+        stubs[i] = (const BYTE *)GetProcAddress( ntdll, eaac_stub_names[i] );
+        ok( stubs[i] != NULL, "%s not found\n", eaac_stub_names[i] );
+        if (!stubs[i]) return;
+        memcpy( before[i], stubs[i], 32 );
+        ok( memcmp( before[i] + 8, eaac_win_tail, sizeof(eaac_win_tail) ), "%s is already patched\n", eaac_stub_names[i] );
+    }
+
+    page = VirtualAlloc( NULL, 0x1000, MEM_COMMIT, PAGE_READWRITE );
+    ok( page != NULL, "VirtualAlloc failed\n" );
+    if (!page) return;
+    page[0] = 0xc3;
+    ok( VirtualProtect( page, 0x1000, PAGE_READONLY, &old_prot ), "VirtualProtect failed\n" );
+    exception = eaac_call_nonexecutable_page( page );
+    ok( exception == STATUS_ACCESS_VIOLATION, "the page did not fault: %08lx\n", exception );
+    VirtualFree( page, 0, MEM_RELEASE );
+
+    for (i = 0; i < ARRAY_SIZE(eaac_stub_names); i++)
+    {
+        ok( memcmp( stubs[i] + 8, eaac_win_tail, sizeof(eaac_win_tail) ),
+            "%s holds the Windows stub outside the gate\n", eaac_stub_names[i] );
+        ok( !memcmp( stubs[i], before[i], 32 ), "%s was modified outside the gate\n", eaac_stub_names[i] );
+    }
+    for (i = 0; i < ARRAY_SIZE(windows_syscalls_WIN10_19045); i++)
+    {
+        const BYTE *stub = (const BYTE *)GetProcAddress( ntdll, windows_syscalls_WIN10_19045[i].name );
+
+        if (stub && !memcmp( stub, eaac_win_prefix, sizeof(eaac_win_prefix) ) &&
+            !memcmp( stub + 8, eaac_win_tail, sizeof(eaac_win_tail) ))
+            patched++;
+    }
+    ok( !patched, "%u Nt syscall stubs hold the Windows 10 19045 bytes outside the gate\n", patched );
+
+    /* the unpatched stub still dispatches, and the raw syscall path is intact */
+    status = pZwSetThreadExecutionState( ES_CONTINUOUS, &old );
+    ok( status == STATUS_SUCCESS && old == ES_CONTINUOUS,
+        "ZwSetThreadExecutionState returned %08lx, old state %08lx\n", status, old );
+    test_access_check_dispatch( FALSE );
+}
+
+static void test_eaac_process_gate( void )
+{
+    static const struct
+    {
+        const char *exe_name;
+        const char *patch_exes;  /* WINE_EAAC_PATCH_EXES in the child, or NULL */
+        BOOL patched;
+    } cases[] =
+    {
+        /* the built-in name, whatever its case */
+        { EAAC_GATE_EXE,                       NULL, TRUE },
+        { "eaanticheat.gameservice.exe",       NULL, TRUE },
+        /* no match: another name, and a name that merely ends in the built-in one */
+        { "unrelated_game.exe",                NULL, FALSE },
+        { "NotEAAntiCheat.GameService.exe",    NULL, FALSE },
+        /* the environment adds names, case-insensitively, ignoring empty entries */
+        { "unrelated_game.exe",                "foo.exe;unrelated_game.exe", TRUE },
+        { "unrelated_game.exe",                ";;UNRELATED_GAME.EXE;", TRUE },
+        { "unrelated_game.exe",                "game.exe;unrelated_game.exe.bak;nrelated_game.exe", FALSE },
+        /* the environment adds to the built-in list, it does not replace it */
+        { EAAC_GATE_EXE,                       "foo.exe", TRUE },
+    };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++)
+    {
+        winetest_push_context( "%s, %s=%s", cases[i].exe_name, EAAC_PATCH_EXES_VAR,
+                               cases[i].patch_exes ? cases[i].patch_exes : "(unset)" );
+        eaac_run_child( cases[i].exe_name, cases[i].patched ? "eaac_patched" : "eaac_unpatched",
+                        cases[i].patch_exes );
         winetest_pop_context();
     }
 }
@@ -917,6 +1077,22 @@ START_TEST(syscall)
         eaac_corrupt_child( atoi( argv[3] ) );
         return;
     }
+    if (argc >= 3 && (!strcmp( argv[2], "eaac_patched" ) || !strcmp( argv[2], "eaac_unpatched" )))
+    {
+        const char *name = strrchr( argv[0], '\\' );
+
+        init_function_pointers();
+        if (!pNtGetNlsSectionPtr || !pZwSetThreadExecutionState || !pNtAccessCheck) return;
+        winetest_push_context( "%s, %s", name ? name + 1 : argv[0], argv[2] );
+        if (!strcmp( argv[2], "eaac_patched" ))
+        {
+            test_zw_stub_windows_bytes();
+            test_zw_stub_independent_golden();
+            test_access_check_dispatch( TRUE );
+        }
+        else test_zw_stubs_unpatched();
+        return;
+    }
     if (!is_wine_19045_macos()) return;
     init_function_pointers();
     if (!pNtGetNlsSectionPtr || !pNtWaitForSingleObject || !pZwSetThreadExecutionState || !pNtAccessCheck) return;
@@ -928,9 +1104,7 @@ START_TEST(syscall)
     test_raw_syscall_registry_flag_boundaries();
     test_raw_syscall_number_boundaries();
     test_raw_syscall_register_semantics();
-    test_zw_stub_windows_bytes();
-    test_zw_stub_independent_golden();
-    test_access_check_dispatch( TRUE );
+    test_eaac_process_gate();
     test_eaac_corrupt_exports();
 #endif
 }

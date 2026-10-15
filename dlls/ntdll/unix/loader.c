@@ -1838,6 +1838,11 @@ static void hacks_init(void)
 
     env_str = getenv("WINE_SIMULATE_WRITECOPY");
     if (env_str) simulate_writecopy = atoi(env_str);
+
+#if defined(__x86_64__)
+    /* ';'-separated image file names that also get the EA anti-cheat Zw stub patch */
+    eaac_patch_init_env( getenv("WINE_EAAC_PATCH_EXES") );
+#endif
 }
 
 
