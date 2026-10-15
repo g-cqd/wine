@@ -114,40 +114,77 @@ BOOL is_wine_syscall_stub_address( ULONG64 addr )
 /* the wine ntdll syscall stubs start with "mov r10,rcx; mov eax,<id>" */
 static const BYTE stub_prefix[] = { 0x4c, 0x8b, 0xd1, 0xb8 };
 
+/* the size of the stub cell write_windows_stub writes at a stub address */
+#define SYSCALL_STUB_CELL_SIZE 32
+
+/* does [rva, rva + bytes) lie inside the ntdll image; no overflow possible */
+static BOOL rva_range_ok( ULONG64 rva, ULONG64 bytes )
+{
+    return rva <= ntdll_size && bytes <= ntdll_size - rva;
+}
+
 /* find the wine ntdll syscall stub exporting name, or NULL if ntdll
  * exports no syscall stub under that name.  AddressOfNameOrdinals
- * entries are direct indices into AddressOfFunctions. */
+ * entries are direct indices into AddressOfFunctions.
+ *
+ * This runs from a signal handler on headers in guest-writable memory, so
+ * it fails closed (returns NULL) on anything out of bounds: every header
+ * field is read once into a local and only the local is validated and used,
+ * and all offsets are 64-bit. */
 static const BYTE *find_wine_syscall_stub( const char *name )
 {
+    const char *base = ntdll_base;
     const IMAGE_DOS_HEADER *dos = ntdll_base;
     const IMAGE_NT_HEADERS64 *nt;
     const IMAGE_EXPORT_DIRECTORY *exports;
     const DWORD *names, *functions;
     const WORD *ordinals;
     size_t len = strlen( name );
-    unsigned int i;
+    ULONG64 exports_rva, names_rva, ordinals_rva, functions_rva;
+    DWORD signature, num_dirs, num_names, num_functions, i;
+    WORD e_magic;
+    DWORD e_lfanew;
 
-    if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
-    nt = (const IMAGE_NT_HEADERS64 *)((const char *)ntdll_base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return NULL;
-    if (!nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress) return NULL;
-    exports = (const IMAGE_EXPORT_DIRECTORY *)((const char *)ntdll_base
-              + nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-    names = (const DWORD *)((const char *)ntdll_base + exports->AddressOfNames);
-    ordinals = (const WORD *)((const char *)ntdll_base + exports->AddressOfNameOrdinals);
-    functions = (const DWORD *)((const char *)ntdll_base + exports->AddressOfFunctions);
+    if (!base || ntdll_size < sizeof(IMAGE_DOS_HEADER)) return NULL;
+    e_magic = dos->e_magic;
+    e_lfanew = dos->e_lfanew;
+    if (e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+    if (!rva_range_ok( e_lfanew, sizeof(IMAGE_NT_HEADERS64) )) return NULL;
+    nt = (const IMAGE_NT_HEADERS64 *)(base + e_lfanew);
+    signature = nt->Signature;
+    num_dirs = nt->OptionalHeader.NumberOfRvaAndSizes;
+    if (signature != IMAGE_NT_SIGNATURE) return NULL;
+    if (num_dirs <= IMAGE_DIRECTORY_ENTRY_EXPORT) return NULL;
+    exports_rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    if (!exports_rva || !rva_range_ok( exports_rva, sizeof(IMAGE_EXPORT_DIRECTORY) )) return NULL;
 
-    for (i = 0; i < exports->NumberOfNames; i++)
+    exports = (const IMAGE_EXPORT_DIRECTORY *)(base + exports_rva);
+    names_rva = exports->AddressOfNames;
+    ordinals_rva = exports->AddressOfNameOrdinals;
+    functions_rva = exports->AddressOfFunctions;
+    num_names = exports->NumberOfNames;
+    num_functions = exports->NumberOfFunctions;
+    if (!rva_range_ok( names_rva, (ULONG64)num_names * sizeof(DWORD) )) return NULL;
+    if (!rva_range_ok( ordinals_rva, (ULONG64)num_names * sizeof(WORD) )) return NULL;
+    if (!rva_range_ok( functions_rva, (ULONG64)num_functions * sizeof(DWORD) )) return NULL;
+    names = (const DWORD *)(base + names_rva);
+    ordinals = (const WORD *)(base + ordinals_rva);
+    functions = (const DWORD *)(base + functions_rva);
+
+    for (i = 0; i < num_names; i++)
     {
-        const char *export_name = (const char *)ntdll_base + names[i];
-        if (memcmp( export_name, name, len + 1 )) continue;
-        if (ordinals[i] >= exports->NumberOfFunctions) return NULL;
-        {
-            const char *func = (const char *)ntdll_base + functions[ordinals[i]];
-            if ((ULONG64)(func + 8 - (const char *)ntdll_base) >= ntdll_size) return NULL;
-            if (memcmp( func, stub_prefix, sizeof(stub_prefix) )) return NULL;
-            return (const BYTE *)func;
-        }
+        DWORD name_rva = names[i];
+        DWORD ordinal, func_rva;
+
+        /* a string that does not fit before the image end cannot equal name */
+        if (!rva_range_ok( name_rva, (ULONG64)len + 1 )) continue;
+        if (memcmp( base + name_rva, name, len + 1 )) continue;
+        ordinal = ordinals[i];
+        if (ordinal >= num_functions) return NULL;
+        func_rva = functions[ordinal];
+        if (!rva_range_ok( func_rva, SYSCALL_STUB_CELL_SIZE )) return NULL;
+        if (memcmp( base + func_rva, stub_prefix, sizeof(stub_prefix) )) return NULL;
+        return (const BYTE *)(base + func_rva);
     }
     return NULL;
 }
@@ -177,21 +214,7 @@ static void load_windows_syscall_cache( void )
     unsigned int i, resolved = 0;
 
     if (!ntdll_base) find_wine_syscall_modules();
-    if (ntdll_base)
-    {
-        const IMAGE_DOS_HEADER *dos = ntdll_base;
-        if (dos->e_magic == IMAGE_DOS_SIGNATURE)
-        {
-            const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)((const char *)ntdll_base + dos->e_lfanew);
-            const IMAGE_DATA_DIRECTORY *dir = nt->OptionalHeader.DataDirectory;
-            const IMAGE_EXPORT_DIRECTORY *exports = (const IMAGE_EXPORT_DIRECTORY *)((const char *)ntdll_base + dir->VirtualAddress);
-            TRACE( "ntdll %p size %x, export dir at %x size %x, %u names / %u functions\n",
-                   ntdll_base, ntdll_size, dir->VirtualAddress, dir->Size,
-                   exports->NumberOfNames, exports->NumberOfFunctions );
-        }
-        else TRACE( "ntdll base %p has no DOS signature\n", ntdll_base );
-    }
-    else TRACE( "ntdll image not found\n" );
+    TRACE( "ntdll %p size %x\n", ntdll_base, ntdll_size );
     {
         unsigned int id;
         if (get_wine_syscall_id( "NtGetNlsSectionPtr", &id ))
@@ -216,12 +239,33 @@ static void load_windows_syscall_cache( void )
     nr_cache_loaded = TRUE;
 }
 
+/* The loader passes the image file size, which can exceed the mapped image
+ * (here 0x2fd000 against a 0x2c2000 view), so bounds checks against it would
+ * still read unmapped memory.  Use the header's SizeOfImage instead.  This
+ * runs at load time, before any guest code can corrupt the headers; it fails
+ * closed if they are not sane: size zero disables both the syscall stub lookup
+ * and the recognition of stub addresses. */
+static unsigned int get_mapped_image_size( const void *base, unsigned int file_size )
+{
+    const IMAGE_DOS_HEADER *dos = base;
+    const IMAGE_NT_HEADERS64 *nt;
+    DWORD e_lfanew;
+
+    if (!base || file_size < sizeof(*dos) || dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    e_lfanew = dos->e_lfanew;
+    if ((ULONG64)e_lfanew + sizeof(*nt) > file_size) return 0;
+    nt = (const IMAGE_NT_HEADERS64 *)((const char *)base + e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    return nt->OptionalHeader.SizeOfImage;
+}
+
 /* resolve the whole cache at ntdll load time, before any guest code can
  * patch the syscall stubs (native loaders hook them) */
 void init_windows_syscall_cache( void *base, unsigned int size )
 {
     ntdll_base = base;
-    ntdll_size = size;
+    ntdll_size = get_mapped_image_size( base, size );
+    if (!ntdll_size) ERR( "ntdll at %p: no usable SizeOfImage, syscall stub lookup disabled\n", base );
     load_windows_syscall_cache();
 }
 

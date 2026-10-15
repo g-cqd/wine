@@ -26,6 +26,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "ntstatus.h"
@@ -559,6 +560,280 @@ static void test_raw_syscall_number_boundaries( void )
         wine_dbgstr_longlong( raw ) );
 }
 
+/* The unix side walks ntdll's export table in guest-writable memory from the
+ * signal handler that applies the EA anti-cheat Zw stub patch.  A corrupted
+ * header or export directory must make the lookup fail closed: no patch and
+ * no crash.  Patching is one-shot per process, so every corruption variant
+ * runs in its own child process. */
+enum eaac_corrupt_variant
+{
+    EAAC_CONTROL,                   /* no corruption: the stubs must be patched */
+    EAAC_LFANEW_HUGE,
+    EAAC_LFANEW_HIGH_BIT,
+    EAAC_EXPORT_RVA_BEYOND_IMAGE,
+    EAAC_NAMES_ARRAY_OVERRUN,
+    EAAC_NUMBER_OF_NAMES_MAX,
+    EAAC_NAME_RVAS_AT_IMAGE_END,
+    EAAC_FUNCTIONS_ARRAY_OVERRUN,
+    EAAC_NUMBER_OF_FUNCTIONS_MAX,
+    EAAC_FUNCTION_RVAS_AT_IMAGE_END,
+    EAAC_NO_EXPORT_DIRECTORY_ENTRY,
+    EAAC_VARIANT_COUNT
+};
+
+/* a range of ntdll image memory made writable, with the original bytes and
+ * the original per-page protection kept for the restore */
+struct guest_range
+{
+    BYTE *addr;
+    SIZE_T size;
+    BYTE *saved;
+    DWORD *prot;
+    SIZE_T pages;
+};
+
+static BOOL guest_range_open( struct guest_range *range, void *addr, SIZE_T size )
+{
+    ULONG_PTR first = (ULONG_PTR)addr & ~(ULONG_PTR)0xfff;
+    ULONG_PTR last = ((ULONG_PTR)addr + size - 1) & ~(ULONG_PTR)0xfff;
+    DWORD old;
+    SIZE_T i;
+
+    memset( range, 0, sizeof(*range) );
+    range->addr = addr;
+    range->size = size;
+    range->pages = (last - first) / 0x1000 + 1;
+    range->prot = HeapAlloc( GetProcessHeap(), 0, range->pages * sizeof(DWORD) );
+    range->saved = HeapAlloc( GetProcessHeap(), 0, size );
+    if (range->prot && range->saved)
+    {
+        memcpy( range->saved, addr, size );  /* before any protection change */
+        for (i = 0; i < range->pages; i++)
+        {
+            void *page = (void *)(first + i * 0x1000);
+
+            if (VirtualProtect( page, 0x1000, PAGE_EXECUTE_READWRITE, &range->prot[i] )) continue;
+            ok( 0, "VirtualProtect failed at %p, error %lu\n", page, GetLastError() );
+            break;
+        }
+        if (i == range->pages) return TRUE;
+        while (i--) VirtualProtect( (void *)(first + i * 0x1000), 0x1000, range->prot[i], &old );
+    }
+    else ok( 0, "out of memory\n" );
+
+    /* a failed range is all zero, so guest_range_close is a no-op on it */
+    if (range->saved) HeapFree( GetProcessHeap(), 0, range->saved );
+    if (range->prot) HeapFree( GetProcessHeap(), 0, range->prot );
+    memset( range, 0, sizeof(*range) );
+    return FALSE;
+}
+
+static void guest_range_close( struct guest_range *range )
+{
+    ULONG_PTR first = (ULONG_PTR)range->addr & ~(ULONG_PTR)0xfff;
+    DWORD old;
+    SIZE_T i;
+
+    if (!range->saved) return;
+    memcpy( range->addr, range->saved, range->size );
+    for (i = 0; i < range->pages; i++)
+        if (range->prot[i]) VirtualProtect( (void *)(first + i * 0x1000), 0x1000, range->prot[i], &old );
+    HeapFree( GetProcessHeap(), 0, range->saved );
+    HeapFree( GetProcessHeap(), 0, range->prot );
+    memset( range, 0, sizeof(*range) );
+}
+
+/* Windows exception dispatch walks the ntdll frames with ntdll's own headers
+ * (e_lfanew, the exception directory), so the headers must be good again by
+ * the time the exception reaches the Windows side.  The unix side has already
+ * run the patch lookup by then.  A vectored handler restores the corrupted
+ * bytes; the fake cell is not part of it. */
+static struct guest_range *eaac_restore_ranges[3];
+
+static LONG CALLBACK eaac_restore_handler( EXCEPTION_POINTERS *info )
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(eaac_restore_ranges); i++)
+    {
+        const struct guest_range *range = eaac_restore_ranges[i];
+
+        if (range && range->saved) memcpy( range->addr, range->saved, range->size );
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void eaac_call_nonexecutable_page( void *page )
+{
+    __try { ((void (*)(void))page)(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static void eaac_corrupt_child( unsigned int variant )
+{
+    static const char *const stub_names[] = { "ZwSetThreadExecutionState", "ZwClose", "NtAccessCheck" };
+    static const BYTE win_prefix[4] = { 0x4c, 0x8b, 0xd1, 0xb8 };
+    /* offsets 8..22 of the Windows stub; wine's own stub shares the first 21 bytes
+     * and differs at the int 0x2e (wine has "jmp +1; ret" there) */
+    static const BYTE win_tail[15] = { 0xf6, 0x04, 0x25, 0x08, 0x03, 0xfe, 0x7f, 0x01,
+                                       0x75, 0x03, 0x0f, 0x05, 0xc3, 0xcd, 0x2e };
+    BYTE *base = (BYTE *)GetModuleHandleW( L"ntdll.dll" );
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
+    IMAGE_DATA_DIRECTORY *dir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    IMAGE_EXPORT_DIRECTORY *exports = (IMAGE_EXPORT_DIRECTORY *)(base + dir->VirtualAddress);
+    DWORD size = nt->OptionalHeader.SizeOfImage;
+    DWORD *names = (DWORD *)(base + exports->AddressOfNames);
+    DWORD *functions = (DWORD *)(base + exports->AddressOfFunctions);
+    DWORD num_names = exports->NumberOfNames, num_functions = exports->NumberOfFunctions;
+    struct guest_range hdr = {0}, dir_range = {0}, table = {0}, cell = {0};
+    BYTE fake_cell[31] = { 0 };
+    SIZE_T fake_size = 0;
+    const BYTE *stubs[ARRAY_SIZE(stub_names)];
+    BYTE before[ARRAY_SIZE(stub_names)][32];
+    BOOL opened = TRUE;
+    DWORD old_prot;
+    void *veh;
+    BYTE *page;
+    DWORD i;
+
+    ok( variant < EAAC_VARIANT_COUNT, "unknown variant %u\n", variant );
+    if (variant >= EAAC_VARIANT_COUNT) return;
+
+    for (i = 0; i < ARRAY_SIZE(stub_names); i++)
+    {
+        stubs[i] = (const BYTE *)GetProcAddress( (HMODULE)base, stub_names[i] );
+        ok( stubs[i] != NULL, "%s not found\n", stub_names[i] );
+        if (!stubs[i]) return;
+        memcpy( before[i], stubs[i], 32 );
+        ok( memcmp( before[i] + 8, win_tail, sizeof(win_tail) ), "%s is already patched\n", stub_names[i] );
+    }
+
+    page = VirtualAlloc( NULL, 0x1000, MEM_COMMIT, PAGE_READWRITE );
+    ok( page != NULL, "VirtualAlloc failed\n" );
+    if (!page) return;
+    page[0] = 0xc3;
+    ok( VirtualProtect( page, 0x1000, PAGE_READONLY, &old_prot ), "VirtualProtect failed\n" );
+
+    switch (variant)
+    {
+    case EAAC_LFANEW_HUGE:
+    case EAAC_LFANEW_HIGH_BIT:
+        opened = guest_range_open( &hdr, &dos->e_lfanew, sizeof(dos->e_lfanew) );
+        break;
+    case EAAC_EXPORT_RVA_BEYOND_IMAGE:
+    case EAAC_NO_EXPORT_DIRECTORY_ENTRY:
+        opened = guest_range_open( &hdr, &nt->OptionalHeader.NumberOfRvaAndSizes,
+                                   (BYTE *)(dir + 1) - (BYTE *)&nt->OptionalHeader.NumberOfRvaAndSizes );
+        break;
+    case EAAC_NAMES_ARRAY_OVERRUN:
+    case EAAC_NUMBER_OF_NAMES_MAX:
+    case EAAC_FUNCTIONS_ARRAY_OVERRUN:
+    case EAAC_NUMBER_OF_FUNCTIONS_MAX:
+        opened = guest_range_open( &dir_range, exports, sizeof(*exports) );
+        break;
+    case EAAC_NAME_RVAS_AT_IMAGE_END:
+        /* an unterminated "NtAccessCheck" in the last 13 bytes of the image,
+         * which every name RVA points at: a len+1 compare has to read one
+         * byte past the end of the image */
+        fake_size = 13;
+        memcpy( fake_cell, "NtAccessCheck", fake_size );
+        opened = guest_range_open( &table, names, num_names * sizeof(*names) ) &&
+                 guest_range_open( &cell, base + size - fake_size, fake_size );
+        break;
+    case EAAC_FUNCTION_RVAS_AT_IMAGE_END:
+        /* A contract guard: this cannot discriminate old from new code.
+         * SizeOfImage is page-aligned, so the 32-byte stub write past the
+         * last 31 bytes lands on the next page, where write_windows_stub's
+         * mprotect fails. */
+        fake_size = sizeof(fake_cell);
+        memcpy( fake_cell, win_prefix, sizeof(win_prefix) );
+        opened = guest_range_open( &table, functions, num_functions * sizeof(*functions) ) &&
+                 guest_range_open( &cell, base + size - fake_size, fake_size );
+        break;
+    }
+    if (opened && cell.addr) memcpy( cell.addr, fake_cell, fake_size );
+
+    if (opened)
+    {
+        /* ntdll's headers are corrupt from here until the vectored handler
+         * (or the close below) restores them: nothing in this window may
+         * resolve an ntdll export */
+        eaac_restore_ranges[0] = &hdr;
+        eaac_restore_ranges[1] = &dir_range;
+        eaac_restore_ranges[2] = &table;
+        veh = AddVectoredExceptionHandler( 1, eaac_restore_handler );
+        ok( veh != NULL, "AddVectoredExceptionHandler failed\n" );
+        switch (variant)
+        {
+        case EAAC_LFANEW_HUGE:                dos->e_lfanew = 0x7fffffff; break;
+        case EAAC_LFANEW_HIGH_BIT:            dos->e_lfanew = 0xfffff000; break;
+        case EAAC_EXPORT_RVA_BEYOND_IMAGE:    dir->VirtualAddress = size + 0x100000; break;
+        case EAAC_NAMES_ARRAY_OVERRUN:        exports->AddressOfNames = size - 8; break;
+        case EAAC_NUMBER_OF_NAMES_MAX:        exports->NumberOfNames = 0xffffffff; break;
+        case EAAC_NAME_RVAS_AT_IMAGE_END:
+            for (i = 0; i < num_names; i++) names[i] = size - fake_size;
+            break;
+        case EAAC_FUNCTIONS_ARRAY_OVERRUN:    exports->AddressOfFunctions = size - 8; break;
+        case EAAC_NUMBER_OF_FUNCTIONS_MAX:    exports->NumberOfFunctions = 0xffffffff; break;
+        case EAAC_FUNCTION_RVAS_AT_IMAGE_END:
+            for (i = 0; i < num_functions; i++) functions[i] = size - fake_size;
+            break;
+        case EAAC_NO_EXPORT_DIRECTORY_ENTRY:
+            nt->OptionalHeader.NumberOfRvaAndSizes = IMAGE_DIRECTORY_ENTRY_EXPORT;
+            break;
+        }
+        eaac_call_nonexecutable_page( page );
+        RemoveVectoredExceptionHandler( veh );
+        memset( eaac_restore_ranges, 0, sizeof(eaac_restore_ranges) );
+    }
+
+    /* the vectored handler has already restored the headers; the fake cell is
+     * restored by the close below.  The checks only read the stubs and the
+     * fake cell; the ranges are closed in reverse order of opening, in case
+     * they share a page */
+    ok( opened, "could not make the ntdll headers writable\n" );
+    for (i = 0; i < ARRAY_SIZE(stub_names); i++)
+    {
+        if (variant == EAAC_CONTROL)
+            ok( !memcmp( stubs[i], win_prefix, sizeof(win_prefix) ) &&
+                !memcmp( stubs[i] + 8, win_tail, sizeof(win_tail) ),
+                "%s was not patched to the Windows stub\n", stub_names[i] );
+        else
+            ok( !memcmp( stubs[i], before[i], 32 ), "%s was patched despite the corrupt export table\n",
+                stub_names[i] );
+    }
+    if (cell.addr)
+        ok( !memcmp( cell.addr, fake_cell, fake_size ), "the cell at the end of the image was written\n" );
+
+    guest_range_close( &cell );
+    guest_range_close( &table );
+    guest_range_close( &dir_range );
+    guest_range_close( &hdr );
+    VirtualFree( page, 0, MEM_RELEASE );
+}
+
+static void test_eaac_corrupt_exports( void )
+{
+    STARTUPINFOA si = { sizeof(si) };
+    char **argv;
+    unsigned int i;
+
+    winetest_get_mainargs( &argv );
+    for (i = 0; i < EAAC_VARIANT_COUNT; i++)
+    {
+        PROCESS_INFORMATION pi;
+        char cmdline[2 * MAX_PATH];
+
+        winetest_push_context( "variant %u", i );
+        snprintf( cmdline, sizeof(cmdline), "\"%s\" %s eaac_corrupt %u", argv[0], argv[1], i );
+        if (!CreateProcessA( NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
+            ok( 0, "CreateProcess failed, error %lu\n", GetLastError() );
+        else wait_child_process( &pi );
+        winetest_pop_context();
+    }
+}
+
 static void init_function_pointers( void )
 {
     HMODULE ntdll = GetModuleHandleW( L"ntdll.dll" );
@@ -607,6 +882,14 @@ static BOOL is_wine_19045_macos( void )
 START_TEST(syscall)
 {
 #ifdef __x86_64__
+    char **argv;
+    int argc = winetest_get_mainargs( &argv );
+
+    if (argc >= 4 && !strcmp( argv[2], "eaac_corrupt" ))
+    {
+        eaac_corrupt_child( atoi( argv[3] ) );
+        return;
+    }
     if (!is_wine_19045_macos()) return;
     init_function_pointers();
     if (!pNtGetNlsSectionPtr || !pNtWaitForSingleObject || !pZwSetThreadExecutionState || !pNtAccessCheck) return;
@@ -621,5 +904,6 @@ START_TEST(syscall)
     test_zw_stub_windows_bytes();
     test_zw_stub_independent_golden();
     test_access_check_dispatch( TRUE );
+    test_eaac_corrupt_exports();
 #endif
 }
