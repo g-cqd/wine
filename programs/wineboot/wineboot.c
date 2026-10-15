@@ -1516,6 +1516,52 @@ static HWND show_wait_window(void)
     return hwnd;
 }
 
+/* Mirror wow64's get_cpu_dll_name (dlls/wow64/syscall.c): the CPU DLL of the
+ * machine's Wow64 registry key, or the platform default. The Wow64Install
+ * rundll32 round can only work when that DLL exists. */
+static BOOL wow64_machine_runnable( WORD machine )
+{
+    SYSTEM_INFO native;
+    const WCHAR *subkey = NULL, *def = L"wow64cpu.dll";
+    WCHAR cpu[MAX_PATH], path[MAX_PATH];
+    DWORD type, size;
+    HKEY key;
+
+    switch (machine)
+    {
+    case IMAGE_FILE_MACHINE_I386:
+        subkey = L"Software\\Microsoft\\Wow64\\x86";
+        GetNativeSystemInfo( &native );
+        if (native.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64)
+            def = L"xtajit.dll";
+        break;
+    case IMAGE_FILE_MACHINE_ARMNT:
+        subkey = L"Software\\Microsoft\\Wow64\\arm";
+        def = L"wowarmhw.dll";
+        break;
+    default:
+        return TRUE;
+    }
+    lstrcpynW( cpu, def, MAX_PATH );
+    size = sizeof(cpu) - sizeof(WCHAR);
+
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, subkey, 0,
+                       KEY_READ | KEY_WOW64_64KEY, &key ) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW( key, NULL, NULL, &type, (BYTE *)cpu, &size ) == ERROR_SUCCESS
+            && (type == REG_SZ || type == REG_EXPAND_SZ))
+            cpu[size / sizeof(WCHAR)] = 0;
+        RegCloseKey( key );
+    }
+
+    GetSystemDirectoryW( path, MAX_PATH );
+    lstrcatW( path, L"\\" );
+    lstrcatW( path, cpu );
+    if (GetFileAttributesW( path ) != INVALID_FILE_ATTRIBUTES) return TRUE;
+    TRACE( "no wow64 CPU DLL %s for machine %04x; the Wow64Install round is skipped\n", debugstr_w(cpu), machine );
+    return FALSE;
+}
+
 static HANDLE start_rundll32( const WCHAR *inf_path, const WCHAR *install, WORD machine )
 {
     WCHAR app[MAX_PATH + ARRAY_SIZE(L"\\rundll32.exe" )];
@@ -1606,12 +1652,13 @@ static void install_root_pnp_devices(void)
         const char *name;
         const char *hardware_id;
         const char *infpath;
+        const char *driver;   /* expected in system32\\drivers; a root device whose driver file is not installed cannot work */
     }
     root_devices[] =
     {
-        {"root\\wine\\winebth", "root\\winebth\0", "C:\\windows\\inf\\winebth.inf"},
-        {"root\\wine\\winebus", "root\\winebus\0", "C:\\windows\\inf\\winebus.inf"},
-        {"root\\wine\\wineusb", "root\\wineusb\0", "C:\\windows\\inf\\wineusb.inf"},
+        {"root\\wine\\winebth", "root\\winebth\0", "C:\\windows\\inf\\winebth.inf", "winebth.sys"},
+        {"root\\wine\\winebus", "root\\winebus\0", "C:\\windows\\inf\\winebus.inf", "winebus.sys"},
+        {"root\\wine\\wineusb", "root\\wineusb\0", "C:\\windows\\inf\\wineusb.inf", "wineusb.sys"},
     };
     SP_DEVINFO_DATA device = {sizeof(device)};
     unsigned int i;
@@ -1625,6 +1672,18 @@ static void install_root_pnp_devices(void)
 
     for (i = 0; i < ARRAY_SIZE(root_devices); ++i)
     {
+        WCHAR path[MAX_PATH], driver[MAX_PATH];
+
+        GetSystemDirectoryW( path, MAX_PATH );
+        MultiByteToWideChar( CP_ACP, 0, root_devices[i].driver, -1, driver, MAX_PATH );
+        lstrcatW( path, L"\\drivers\\" );
+        lstrcatW( path, driver );
+        if (GetFileAttributesW( path ) == INVALID_FILE_ATTRIBUTES)
+        {
+            TRACE( "skipping %s: driver %s is not installed\n", root_devices[i].name, root_devices[i].driver );
+            continue;
+        }
+
         if (!SetupDiCreateDeviceInfoA( set, root_devices[i].name, &GUID_NULL, NULL, NULL, 0, &device))
         {
             if (GetLastError() != ERROR_DEVINST_ALREADY_EXISTS)
@@ -1734,10 +1793,18 @@ static void update_wineprefix( BOOL force )
                     CloseHandle( process );
                 }
                 if (!machines[count].Machine) break;
+                TRACE( "wine.inf round %u: machine %04x native %u\n", count,
+                       machines[count].Machine, machines[count].Native );
                 if (machines[count].Native)
                     process = start_rundll32( inf_path, L"DefaultInstall", IMAGE_FILE_MACHINE_TARGET_HOST );
-                else
+                else if (wow64_machine_runnable( machines[count].Machine ))
                     process = start_rundll32( inf_path, L"Wow64Install", machines[count].Machine );
+                else
+                    /* No CPU DLL for this machine (arm64 without a configured
+                     * i386 BTCpu yet): the wow64 rundll32 would fail to start
+                     * with c0000135. Skip the round; it runs once the CPU DLL
+                     * is installed and registered. */
+                    process = 0;
                 count++;
             }
             DestroyWindow( hwnd );

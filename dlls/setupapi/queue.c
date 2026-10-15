@@ -1165,7 +1165,9 @@ static BOOL do_file_copyW( LPCWSTR source, LPCWSTR target, DWORD style,
     if (style & (SP_COPY_NODECOMP | SP_COPY_LANGUAGEAWARE | SP_COPY_FORCE_IN_USE |
                  SP_COPY_NOSKIP | SP_COPY_WARNIFSKIP))
     {
-        ERR("Unsupported style(s) 0x%lx\n",style);
+        /* These flags only affect in-use/skip interaction with the user; the
+         * copy itself proceeds normally, so say so at warn level. */
+        WARN("style flags not implemented, copying anyway: 0x%lx\n", style);
     }
 
     if (docopy)
@@ -1798,8 +1800,15 @@ UINT WINAPI SetupDefaultQueueCallbackA( PVOID context, UINT notification,
         TRACE( "end copy %s -> %s\n", debugstr_a(paths->Source), debugstr_a(paths->Target) );
         return 0;
     case SPFILENOTIFY_COPYERROR:
-        ERR( "copy error %d %s -> %s\n", paths->Win32Error,
-             debugstr_a(paths->Source), debugstr_a(paths->Target) );
+        if (paths->Win32Error == ERROR_FILE_NOT_FOUND || paths->Win32Error == ERROR_PATH_NOT_FOUND ||
+            (paths->Win32Error >= ERROR_RESOURCE_DATA_NOT_FOUND && paths->Win32Error <= ERROR_RESOURCE_LANG_NOT_FOUND))
+            /* the source (e.g. a driver file this platform does not install) cannot
+             * provide the file; the target is simply not installed. */
+            WARN( "skipping copy of %s to %s: source unavailable (error %d)\n",
+                  debugstr_a(paths->Source), debugstr_a(paths->Target), paths->Win32Error );
+        else
+            ERR( "copy error %d %s -> %s\n", paths->Win32Error,
+                 debugstr_a(paths->Source), debugstr_a(paths->Target) );
         return FILEOP_SKIP;
     case SPFILENOTIFY_NEEDMEDIA:
     {
@@ -1867,8 +1876,15 @@ UINT WINAPI SetupDefaultQueueCallbackW( PVOID context, UINT notification,
         TRACE( "end copy %s -> %s\n", debugstr_w(paths->Source), debugstr_w(paths->Target) );
         return 0;
     case SPFILENOTIFY_COPYERROR:
-        ERR( "copy error %d %s -> %s\n", paths->Win32Error,
-             debugstr_w(paths->Source), debugstr_w(paths->Target) );
+        if (paths->Win32Error == ERROR_FILE_NOT_FOUND || paths->Win32Error == ERROR_PATH_NOT_FOUND ||
+            (paths->Win32Error >= ERROR_RESOURCE_DATA_NOT_FOUND && paths->Win32Error <= ERROR_RESOURCE_LANG_NOT_FOUND))
+            /* the source (e.g. a driver file this platform does not install) cannot
+             * provide the file; the target is simply not installed. */
+            WARN( "skipping copy of %s to %s: source unavailable (error %d)\n",
+                  debugstr_w(paths->Source), debugstr_w(paths->Target), paths->Win32Error );
+        else
+            ERR( "copy error %d %s -> %s\n", paths->Win32Error,
+                 debugstr_w(paths->Source), debugstr_w(paths->Target) );
         return FILEOP_SKIP;
     case SPFILENOTIFY_NEEDMEDIA:
     {

@@ -1903,7 +1903,14 @@ NTSTATUS WINAPI DriverEntry( DRIVER_OBJECT *driver, UNICODE_STRING *path )
 
     status = winebluetooth_init();
     if (status)
-        return status;
+    {
+        /* A system without a Bluetooth backend (no bluez over dbus, e.g. macOS)
+         * behaves like a system with no radios: the driver loads, the service
+         * starts and every Bluetooth request returns STATUS_NOT_SUPPORTED
+         * (dbus_connection stays NULL). Failing DriverEntry instead makes the
+         * service fail to start (ZwLoadDriver) at every prefix creation. */
+        WARN( "winebluetooth_init failed with %#lx; loading with no radios\n", status );
+    }
 
     driver_obj = driver;
 
