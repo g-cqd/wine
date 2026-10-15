@@ -3118,7 +3118,7 @@ static BOOL replace_path( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *str, ULONG pr
 {
     const WCHAR *name = attr->ObjectName->Buffer;
     ULONG match_len, replace_len, len = attr->ObjectName->Length / sizeof(WCHAR);
-    WCHAR *p;
+    WCHAR *p, *old_buf = (str->Buffer == name) ? str->Buffer : NULL;
 
     if (!starts_with_path( name + prefix_len, len - prefix_len, match )) return FALSE;
 
@@ -3137,6 +3137,7 @@ static BOOL replace_path( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *str, ULONG pr
     memcpy( p, name, len * sizeof(WCHAR) );
     p[len] = 0;
     attr->ObjectName = str;
+    free( old_buf );
     return TRUE;
 }
 
@@ -4319,6 +4320,71 @@ static void remove_trailing_backslash( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *
     nt_name->Buffer[len - 1] = 0;
 }
 
+static BOOL expand_systemroot( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *expanded )
+{
+    static const WCHAR systemrootW[] = {'\\','S','y','s','t','e','m','R','o','o','t'};
+    static const WCHAR default_windirW[] = {'C',':','\\','w','i','n','d','o','w','s'};
+    const WCHAR *name, *root;
+    ULONG lenW, root_len, rem_len, total_len, prefix_len;
+    BOOL match, has_nt_prefix;
+    WCHAR *p;
+
+    if (attr->RootDirectory) return FALSE;
+    if (!attr->ObjectName || !attr->ObjectName->Buffer) return FALSE;
+
+    lenW = attr->ObjectName->Length / sizeof(WCHAR);
+    if (lenW < ARRAY_SIZE(systemrootW)) return FALSE;
+    name = attr->ObjectName->Buffer;
+
+    if (attr->Attributes & OBJ_CASE_INSENSITIVE)
+        match = !wcsnicmp( name, systemrootW, ARRAY_SIZE(systemrootW) );
+    else
+        match = !wcsncmp( name, systemrootW, ARRAY_SIZE(systemrootW) );
+
+    if (!match) return FALSE;
+    if (lenW > ARRAY_SIZE(systemrootW) && name[ARRAY_SIZE(systemrootW)] != '\\') return FALSE;
+
+    if (user_shared_data && user_shared_data->NtSystemRoot[0])
+    {
+        root = user_shared_data->NtSystemRoot;
+        root_len = wcslen( root );
+    }
+    else
+    {
+        root = default_windirW;
+        root_len = ARRAY_SIZE(default_windirW);
+    }
+
+    while (root_len > 0 && root[root_len - 1] == '\\') root_len--;
+
+    has_nt_prefix = (root_len >= ARRAY_SIZE(nt_prefixW) &&
+                     !memcmp( root, nt_prefixW, sizeof(nt_prefixW) ));
+    prefix_len = has_nt_prefix ? 0 : ARRAY_SIZE(nt_prefixW);
+    rem_len = lenW - ARRAY_SIZE(systemrootW); /* 0 or includes leading '\\' */
+    total_len = prefix_len + root_len + rem_len;
+
+    expanded->Length = total_len * sizeof(WCHAR);
+    expanded->MaximumLength = expanded->Length + sizeof(WCHAR);
+    if (!(p = expanded->Buffer = malloc( expanded->MaximumLength ))) return FALSE;
+
+    if (prefix_len)
+    {
+        memcpy( p, nt_prefixW, sizeof(nt_prefixW) );
+        p += prefix_len;
+    }
+    memcpy( p, root, root_len * sizeof(WCHAR) );
+    p += root_len;
+    if (rem_len)
+    {
+        memcpy( p, name + ARRAY_SIZE(systemrootW), rem_len * sizeof(WCHAR) );
+        p += rem_len;
+    }
+    *p = 0;
+
+    attr->ObjectName = expanded;
+    return TRUE;
+}
+
 /***********************************************************************
  *           get_nt_and_unix_names
  *
@@ -4363,6 +4429,7 @@ NTSTATUS get_nt_and_unix_names( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nt_name
     }
     else
     {
+        expand_systemroot( attr, nt_name );
 #ifndef _WIN64
         get_redirect( attr, nt_name );
 #endif

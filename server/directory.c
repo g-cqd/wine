@@ -396,6 +396,8 @@ void init_directories( struct fd *intl_fd )
         '\\','C','u','r','r','e','n','t','O','u','t'};
     static const WCHAR link_consoleW[]    = {'\\','D','e','v','i','c','e','\\','C','o','n','D','r','v',
         '\\','C','o','n','s','o','l','e'};
+    static const WCHAR link_systemrootW[] = {'S','y','s','t','e','m','R','o','o','t'};
+    static const WCHAR link_target_systemrootW[] = {'\\','?','?','\\','C',':','\\','w','i','n','d','o','w','s'};
     static const struct unicode_str link_dosdev_str = {link_dosdevW, sizeof(link_dosdevW)};
     static const struct unicode_str link_globalroot_str = {link_globalrootW, sizeof(link_globalrootW)};
     static const struct unicode_str link_global_str = {link_globalW, sizeof(link_globalW)};
@@ -408,6 +410,8 @@ void init_directories( struct fd *intl_fd )
     static const struct unicode_str link_currentin_str = {link_currentinW, sizeof(link_currentinW)};
     static const struct unicode_str link_currentout_str = {link_currentoutW, sizeof(link_currentoutW)};
     static const struct unicode_str link_console_str  = {link_consoleW, sizeof(link_consoleW)};
+    static const struct unicode_str link_systemroot_str = {link_systemrootW, sizeof(link_systemrootW)};
+    static const struct unicode_str link_target_systemroot_str = {link_target_systemrootW, sizeof(link_target_systemrootW)};
 
     /* devices */
     static const WCHAR named_pipeW[] = {'N','a','m','e','d','P','i','p','e'};
@@ -479,6 +483,7 @@ void init_directories( struct fd *intl_fd )
 
     /* symlinks */
     release_object( create_obj_symlink( &root_directory->obj, &link_dosdev_str, OBJ_PERMANENT, &dir_global->obj, NULL ));
+    release_object( create_symlink( &root_directory->obj, &link_systemroot_str, OBJ_PERMANENT, &link_target_systemroot_str, NULL ));
     release_object( create_root_symlink( &dir_global->obj, &link_globalroot_str, OBJ_PERMANENT, NULL ));
     release_object( create_obj_symlink( &dir_global->obj, &link_global_str, OBJ_PERMANENT, &dir_global->obj, NULL ));
     release_object( create_obj_symlink( &dir_global->obj, &link_nul_str, OBJ_PERMANENT, null_device, NULL ));

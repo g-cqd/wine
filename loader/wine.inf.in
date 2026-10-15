@@ -809,6 +809,7 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
 10,tasks,
 10,temp,
 11,catroot,
+11,catroot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE},
 11,mui,
 11,tasks,
 11,spool\printers,

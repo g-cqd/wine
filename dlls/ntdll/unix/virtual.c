@@ -4847,6 +4847,12 @@ void virtual_init_user_shared_data(void)
     case IMAGE_FILE_MACHINE_ARM64: data->NativeProcessorArchitecture = PROCESSOR_ARCHITECTURE_ARM64; break;
     }
 
+    if (!data->NtSystemRoot[0])
+    {
+        static const WCHAR default_windirW[] = {'C',':','\\','w','i','n','d','o','w','s',0};
+        wcscpy( data->NtSystemRoot, default_windirW );
+    }
+
     init_shared_data_cpuinfo( data );
     munmap( data, sizeof(*data) );
 }

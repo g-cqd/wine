@@ -7338,6 +7338,164 @@ static void test_file_map_large_size(void)
     DeleteFileA(source);
 }
 
+static void test_systemroot_paths(void)
+{
+    UNICODE_STRING nameW, nameW2;
+    OBJECT_ATTRIBUTES attr;
+    IO_STATUS_BLOCK io;
+    HANDLE handle = NULL, handle2 = NULL, dir_handle = NULL;
+    NTSTATUS status;
+    FILE_INTERNAL_INFORMATION id1, id2;
+    WCHAR non_terminated[64];
+
+    /* 1. Open kernel32.dll via DOS path and verify FileInternalInformation */
+    pRtlInitUnicodeString( &nameW, L"\\??\\C:\\windows\\system32\\kernel32.dll" );
+    InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = pNtOpenFile( &handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( !status, "failed to open DOS path kernel32.dll: %#lx\n", status );
+    if (!status)
+    {
+        memset( &id1, 0, sizeof(id1) );
+        status = NtQueryInformationFile( handle, &io, &id1, sizeof(id1), FileInternalInformation );
+        ok( !status, "failed to query DOS path FileInternalInformation: %#lx\n", status );
+    }
+
+    /* 2. Open kernel32.dll via \\SystemRoot\\system32\\kernel32.dll */
+    pRtlInitUnicodeString( &nameW2, L"\\SystemRoot\\system32\\kernel32.dll" );
+    InitializeObjectAttributes( &attr, &nameW2, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = pNtOpenFile( &handle2, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( !status, "failed to open \\SystemRoot\\system32\\kernel32.dll: %#lx\n", status );
+    if (!status)
+    {
+        memset( &id2, 0, sizeof(id2) );
+        status = NtQueryInformationFile( handle2, &io, &id2, sizeof(id2), FileInternalInformation );
+        ok( !status, "failed to query \\SystemRoot FileInternalInformation: %#lx\n", status );
+        ok( id1.IndexNumber.QuadPart == id2.IndexNumber.QuadPart, "id mismatch: %I64x vs %I64x\n",
+            id1.IndexNumber.QuadPart, id2.IndexNumber.QuadPart );
+        CloseHandle( handle2 );
+    }
+    if (handle) CloseHandle( handle );
+
+    /* 3. Uppercase \\SYSTEMROOT\\system32\\kernel32.dll with OBJ_CASE_INSENSITIVE */
+    pRtlInitUnicodeString( &nameW, L"\\SYSTEMROOT\\system32\\kernel32.dll" );
+    InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+    handle = NULL;
+    status = pNtOpenFile( &handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( !status, "failed to open \\SYSTEMROOT: %#lx\n", status );
+    if (!status) CloseHandle( handle );
+
+    /* 4. Lowercase / mixed-case \\systemroot\\system32\\kernel32.dll with OBJ_CASE_INSENSITIVE */
+    pRtlInitUnicodeString( &nameW, L"\\systemroot\\system32\\kernel32.dll" );
+    InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+    handle = NULL;
+    status = pNtOpenFile( &handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( !status, "failed to open \\systemroot with OBJ_CASE_INSENSITIVE: %#lx\n", status );
+    if (!status) CloseHandle( handle );
+
+    /* 5. Case-sensitive: \\SystemRoot (exact case) vs \\systemroot (wrong case) without OBJ_CASE_INSENSITIVE */
+    pRtlInitUnicodeString( &nameW, L"\\SystemRoot\\system32\\kernel32.dll" );
+    InitializeObjectAttributes( &attr, &nameW, 0, 0, NULL );
+    handle = NULL;
+    status = pNtOpenFile( &handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( !status, "failed case-sensitive \\SystemRoot: %#lx\n", status );
+    if (!status) CloseHandle( handle );
+
+    pRtlInitUnicodeString( &nameW, L"\\systemroot\\system32\\kernel32.dll" );
+    InitializeObjectAttributes( &attr, &nameW, 0, 0, NULL );
+    handle = NULL;
+    status = pNtOpenFile( &handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( status == STATUS_OBJECT_PATH_NOT_FOUND || status == STATUS_OBJECT_NAME_NOT_FOUND,
+        "unexpected status for case-sensitive mismatch: %#lx\n", status );
+    if (!status) CloseHandle( handle );
+
+    /* 6. Bare \\SystemRoot and \\SystemRoot\\ opening Windows directory */
+    pRtlInitUnicodeString( &nameW, L"\\SystemRoot" );
+    InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+    handle = NULL;
+    status = pNtOpenFile( &handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( !status, "failed to open bare \\SystemRoot as directory: %#lx\n", status );
+    if (!status) CloseHandle( handle );
+
+    pRtlInitUnicodeString( &nameW, L"\\SystemRoot\\" );
+    InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+    handle = NULL;
+    status = pNtOpenFile( &handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( !status, "failed to open \\SystemRoot\\ as directory: %#lx\n", status );
+    if (!status) CloseHandle( handle );
+
+    /* 7. \\SystemRootX\\... must NOT be accepted as alias */
+    pRtlInitUnicodeString( &nameW, L"\\SystemRootX\\system32\\kernel32.dll" );
+    InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+    handle = NULL;
+    status = pNtOpenFile( &handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( status == STATUS_OBJECT_PATH_NOT_FOUND || status == STATUS_BAD_DEVICE_TYPE,
+        "unexpected status for \\SystemRootX: %#lx\n", status );
+    if (!status) CloseHandle( handle );
+
+    /* 8. Missing child yields STATUS_OBJECT_NAME_NOT_FOUND */
+    pRtlInitUnicodeString( &nameW, L"\\SystemRoot\\system32\\nonexistent_test_file_xyz.dll" );
+    InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+    handle = NULL;
+    status = pNtOpenFile( &handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( status == STATUS_OBJECT_NAME_NOT_FOUND,
+        "unexpected status for missing child: %#lx\n", status );
+    if (!status) CloseHandle( handle );
+
+    /* 9. Root-relative handle with absolute \\SystemRoot path must fail with STATUS_OBJECT_PATH_SYNTAX_BAD */
+    pRtlInitUnicodeString( &nameW, L"\\??\\C:\\windows" );
+    InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = pNtOpenFile( &dir_handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( !status, "failed to open root dir: %#lx\n", status );
+    if (!status)
+    {
+        pRtlInitUnicodeString( &nameW, L"\\SystemRoot\\system32\\kernel32.dll" );
+        InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, dir_handle, NULL );
+        handle = NULL;
+        status = pNtOpenFile( &handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+        ok( status == STATUS_OBJECT_PATH_SYNTAX_BAD || status == STATUS_INVALID_PARAMETER,
+            "expected STATUS_OBJECT_PATH_SYNTAX_BAD or STATUS_INVALID_PARAMETER for absolute path with root dir, got %#lx\n", status );
+        if (!status) CloseHandle( handle );
+        CloseHandle( dir_handle );
+    }
+
+    /* 10. Length-delimited string without null terminator */
+    memcpy( non_terminated, L"\\SystemRoot\\system32\\kernel32.dllXXXXXX", sizeof(L"\\SystemRoot\\system32\\kernel32.dllXXXXXX") );
+    nameW.Buffer = non_terminated;
+    nameW.Length = wcslen( L"\\SystemRoot\\system32\\kernel32.dll" ) * sizeof(WCHAR);
+    nameW.MaximumLength = nameW.Length;
+    InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+    handle = NULL;
+    status = pNtOpenFile( &handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    ok( !status, "failed length-delimited \\SystemRoot open: %#lx\n", status );
+    if (!status) CloseHandle( handle );
+}
+
 START_TEST(file)
 {
     HMODULE hkernel32 = GetModuleHandleA("kernel32.dll");
@@ -7422,4 +7580,5 @@ START_TEST(file)
     test_mailslot_name();
     test_reparse_points();
     test_file_map_large_size();
+    test_systemroot_paths();
 }
