@@ -2871,6 +2871,25 @@ static volatile BOOL eaac_stubs_patched;
 static volatile BOOL eaac_patch_done;
 static unsigned int eaac_xlat_fail_logged;
 
+/* Upper bound on how long a thread that faults while another thread is
+ * patching the stubs waits for the patch to finish (see the "patched ... in
+ * N us" trace for the patch's cost).  Wall-clock time on the monotonic clock,
+ * so it does not vary with scheduler latency or CPU load.  A waiter that
+ * times out runs on with unpatched stubs, so keep it well above the patch's
+ * cost. */
+#define EAAC_PATCH_WAIT_NS (10 * 1000000)  /* 10 ms */
+
+/* Read the monotonic clock in nanoseconds (async-signal-safe).  Returns FALSE
+ * if the clock is unavailable. */
+static BOOL eaac_monotonic_ns( UINT64 *ns )
+{
+    struct timespec now;
+
+    if (clock_gettime( CLOCK_MONOTONIC, &now )) return FALSE;
+    *ns = (UINT64)now.tv_sec * 1000000000 + now.tv_nsec;
+    return TRUE;
+}
+
 /* The patch fires only in the EA anti-cheat GameService process, identified by
  * the file name of the process image.  The decision is taken once, in
  * signal_init_process(), and cached: the signal handler only reads the flag.
@@ -3049,16 +3068,34 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     {
         if (!__sync_lock_test_and_set( &eaac_stubs_patched, 1 ))
         {
+            UINT64 t0 = 0, t1 = 0;
+            BOOL timed = eaac_monotonic_ns( &t0 );
             unsigned int patched = eaac_patch_windows_zw_stubs( write_windows_stub );
-            TRACE_(seh)( "patched %u Zw stubs to Windows 19045 bytes\n", patched );
+            timed = timed && eaac_monotonic_ns( &t1 );
+            TRACE_(seh)( "patched %u Zw stubs to Windows 19045 bytes in %llu us\n", patched,
+                         timed ? (unsigned long long)((t1 - t0) / 1000) : 0ULL );
             __sync_synchronize();
             eaac_patch_done = TRUE;
         }
         else
         {
+            UINT64 start = 0, now = 0;
             unsigned int spins = 0;
-            while (!eaac_patch_done && spins++ < 100000) sched_yield();
-            TRACE_(seh)( "waited for Zw stub patch: done %u spins %u\n", (unsigned int)eaac_patch_done, spins );
+
+            /* fail safe: if the clock is unavailable, do not wait at all */
+            if (eaac_monotonic_ns( &start ))
+            {
+                now = start;
+                while (!eaac_patch_done && now - start < EAAC_PATCH_WAIT_NS)
+                {
+                    sched_yield();
+                    spins++;
+                    if (!eaac_monotonic_ns( &now )) break;
+                }
+            }
+            TRACE_(seh)( "waited for Zw stub patch: done %u spins %u elapsed %llu us\n",
+                         (unsigned int)eaac_patch_done, spins,
+                         (unsigned long long)((now - start) / 1000) );
         }
     }
 
