@@ -234,15 +234,6 @@ static void load_windows_syscall_cache( void )
         }
         else win_nr_to_id[nr] = WIN_SYSCALL_KNOWN;
     }
-    {
-        unsigned int get_next_thread_id;
-        if (get_wine_syscall_id( "NtGetNextThread", &get_next_thread_id ))
-        {
-            /* In Windows 11 24H2+, NtGetNextThread is syscall 0x0101 (in Win10 19045 it was 0x00f9).
-             * Anti-cheat probes and thread enumerations target Windows 11 syscall layout. */
-            win_nr_to_id[0x0101] = get_next_thread_id + 1;
-        }
-    }
     TRACE( "%u of %u Windows syscalls resolved to wine stubs\n",
            resolved, (unsigned int)ARRAY_SIZE( windows_syscalls_WIN10_19045 ) );
     nr_cache_loaded = TRUE;
