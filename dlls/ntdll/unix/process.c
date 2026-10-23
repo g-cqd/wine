@@ -89,16 +89,16 @@ static ULONG execute_flags = MEM_EXECUTE_OPTION_DISABLE;
 /* Under Rosetta every page that is writable and executable costs a Mach round
  * trip on first touch, and turning no-execute off makes every readable mapping
  * executable, so a process that does it crawls. Keep no-execute permanently on
- * there, as the Windows AlwaysOn policy does. WINE_DISABLE_NX_COMPAT=0 lets a
- * process turn it off again on any host; any other value keeps it on on every
- * host. */
+ * there, as the Windows AlwaysOn policy does. WINE_FORCE_NX=0 or WINE_DISABLE_NX_COMPAT=0
+ * lets a process turn it off again on any host; any other value keeps it on on every host. */
 static ULONG get_execute_flags(void)
 {
     static int always_on = -1;
 
     if (always_on == -1)
     {
-        const char *env = getenv( "WINE_DISABLE_NX_COMPAT" );
+        const char *env = getenv( "WINE_FORCE_NX" );
+        if (!env) env = getenv( "WINE_DISABLE_NX_COMPAT" );
 
         if (env) always_on = strcmp( env, "0" ) != 0;
         else

@@ -2190,7 +2190,6 @@ static NSString* metal_layer_filter(BOOL mode)
            and menu bar hidden over the desktop. */
         if ([self willEnterNativeFullScreen])
             return NO;
-
         return screen && fullscreen && screen_covered_by_rect(contentRect, @[screen]);
     }
 

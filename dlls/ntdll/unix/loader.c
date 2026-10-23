@@ -827,7 +827,6 @@ static void restore_rosetta_aot_env(void)
     else unsetenv( "ROSETTA_DISABLE_AOT" );
     unsetenv( X87_SAVED_AOT_ENV );
 }
-
 /* Whether to start this process under the x87sidecar: -1 undecided, 0 no,
  * 1 yes. spawn_process sets it in the child, together with the sidecar to
  * use, from what the parent decided; the first process of a launch decides
@@ -3098,7 +3097,8 @@ static void check_command_line( int argc, char *argv[] )
 
 
 #if defined(__APPLE__) && !defined(__aarch64__)  /* x86_64 Rosetta sidecar only */
-/* CW HACK: tell the user that the x87sidecar did not install its hook. This is * printed unconditionally, so that it shows even with WINEDEBUG=-all. The
+/* CW HACK: tell the user that the x87sidecar did not install its hook. This is
+ * printed unconditionally, so that it shows even with WINEDEBUG=-all. The
  * sidecar prints a banner with the same "RUNNING WITHOUT X87 ACCELERATION" text
  * when it gives up on its own side. */
 static void x87_coop_unhooked( const char *reason )

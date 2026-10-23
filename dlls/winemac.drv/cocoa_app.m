@@ -2625,6 +2625,35 @@ static NSString* WineLocalizedString(unsigned int stringID)
         return config;
     }
 
+    /* The parts of the screen configuration that Wine's view of the displays
+       depends on: which screens exist, where they are, their work areas,
+       their backing scale and their CG display mode. */
+    - (NSArray*) currentScreenConfiguration
+    {
+        NSMutableArray* config = [NSMutableArray array];
+        NSScreen* screen;
+
+        for (screen in [NSScreen screens])
+        {
+            NSNumber* displayID = [screen.deviceDescription objectForKey:@"NSScreenNumber"];
+            CGDisplayModeRef mode = CGDisplayCopyDisplayMode([displayID unsignedIntValue]);
+            NSMutableDictionary* entry = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                displayID ? displayID : (id)[NSNull null], @"id",
+                NSStringFromRect([screen frame]), @"frame",
+                NSStringFromRect([screen visibleFrame]), @"visibleFrame",
+                [NSNumber numberWithDouble:[screen backingScaleFactor]], @"scale",
+                nil];
+            if (mode)
+            {
+                [entry setObject:(id)mode forKey:@"mode"];
+                CGDisplayModeRelease(mode);
+            }
+            [config addObject:entry];
+        }
+
+        return config;
+    }
+
     - (void)applicationDidChangeScreenParameters:(NSNotification *)notification
     {
         NSArray* config = [self currentScreenConfiguration];

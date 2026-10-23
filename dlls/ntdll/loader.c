@@ -1618,7 +1618,7 @@ static WINE_MODREF *alloc_module( HMODULE hModule, const UNICODE_STRING *nt_name
      * the process. Turning it off forces PROT_EXEC on every readable mapping,
      * and under Rosetta each fresh writable and executable page then costs a
      * Mach round trip on first touch, so the process policy keeps it on there
-     * unless WINE_DISABLE_NX_COMPAT=0. */
+     * unless WINE_FORCE_NX=0 or WINE_DISABLE_NX_COMPAT=0. */
     if (hModule == NtCurrentTeb()->Peb->ImageBaseAddress &&
         !(nt->OptionalHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT))
     {
