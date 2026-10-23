@@ -21,7 +21,7 @@ The source lives at `/Users/gc/Developer/wine`. Build output does not live in th
 
 ## Current upstream base
 
-`athei/cx-26-patched` at `93429c6e7c8` ("loader: Substitute Menlo for Lucida Console."), folded into `main` by merge commit `d0953441aba` on 2026-10-14. Update this section whenever a sync lands.
+`athei/cx-26-patched` at `7648213036a` ("loader: Substitute Menlo for Lucida Console."), folded into `main` by merge commit `79c493a9bd5` on 2026-10-24. Update this section whenever a sync lands.
 
 To check for new upstream commits:
 
