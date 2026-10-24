@@ -32,7 +32,12 @@ struct key
 {
     enum algid algid;
     BCRYPT_KEY_HANDLE bcrypt_key;
+    const struct ecc_alg *ecc;  /* curve of an ECDSA/ECDH key */
+    WCHAR *name;                /* name of a persisted key, or NULL */
+    BOOL machine;               /* persisted for the machine, not the user */
 };
+
+struct ecc_alg;
 
 struct storage_provider
 {

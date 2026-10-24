@@ -829,6 +829,52 @@ static void test_NCryptExportKey(void)
     NCryptFreeObject(prov);
 }
 
+static void test_persisted_ecdsa_key(void)
+{
+    static const WCHAR name[] = L"winetest/ncrypt/ecdsa_p256";
+    BYTE hash[32], sig[64], pub1[128], pub2[128];
+    NCRYPT_KEY_HANDLE key, key2;
+    NCRYPT_PROV_HANDLE prov;
+    DWORD size, size1, size2;
+    SECURITY_STATUS ret;
+    WCHAR group[16];
+
+    ret = NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    if (!NCryptOpenKey(prov, &key, name, 0, 0)) NCryptDeleteKey(key, 0);   /* left over from a failed run */
+
+    ret = NCryptCreatePersistedKey(prov, &key, BCRYPT_ECDSA_P256_ALGORITHM, name, 0, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptGetProperty(key, NCRYPT_ALGORITHM_GROUP_PROPERTY, (BYTE *)group, sizeof(group), &size, 0);
+    ok(ret == ERROR_SUCCESS && !lstrcmpW(group, NCRYPT_ECDSA_ALGORITHM_GROUP), "got %#lx %s\n", ret, wine_dbgstr_w(group));
+    ret = NCryptFinalizeKey(key, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+
+    memset(hash, 0x5a, sizeof(hash));
+    ret = NCryptSignHash(key, NULL, hash, sizeof(hash), sig, sizeof(sig), &size, 0);
+    ok(ret == ERROR_SUCCESS && size == sizeof(sig), "got %#lx size %lu\n", ret, size);
+    ret = NCryptExportKey(key, 0, BCRYPT_ECCPUBLIC_BLOB, NULL, pub1, sizeof(pub1), &size1, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+
+    ret = NCryptCreatePersistedKey(prov, &key2, BCRYPT_ECDSA_P256_ALGORITHM, name, 0, 0);
+    ok(ret == NTE_EXISTS, "got %#lx\n", ret);
+
+    /* a second handle opened by name holds the same key */
+    ret = NCryptOpenKey(prov, &key2, name, 0, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptExportKey(key2, 0, BCRYPT_ECCPUBLIC_BLOB, NULL, pub2, sizeof(pub2), &size2, 0);
+    ok(ret == ERROR_SUCCESS && size1 == size2 && !memcmp(pub1, pub2, size1), "public keys differ\n");
+    ret = NCryptVerifySignature(key2, NULL, hash, sizeof(hash), sig, sizeof(sig), 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+
+    NCryptFreeObject(key);
+    ret = NCryptDeleteKey(key2, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptOpenKey(prov, &key, name, 0, 0);
+    ok(ret == NTE_BAD_KEYSET, "got %#lx\n", ret);
+    NCryptFreeObject(prov);
+}
+
 START_TEST(ncrypt)
 {
     test_key_import_rsa();
@@ -841,4 +887,5 @@ START_TEST(ncrypt)
     test_NCryptIsAlgSupported();
     test_NCryptEncrypt();
     test_NCryptExportKey();
+    test_persisted_ecdsa_key();
 }
