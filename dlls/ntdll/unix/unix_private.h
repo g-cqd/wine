@@ -86,6 +86,16 @@ static inline BOOL is_wow64(void)
     return !!wow_peb;
 }
 
+/* Value of a BOOLEAN syscall argument, from its low byte only.
+ * The Windows x64 ABI leaves the upper bits of a BOOLEAN argument undefined, and a
+ * caller that writes only the low byte of its stack slot leaves stale data above it.
+ * clang assumes that the caller extended the value and tests the whole register, so
+ * read the argument back through memory as one byte. */
+static inline BOOLEAN syscall_boolean( const volatile BOOLEAN *arg )
+{
+    return *arg;
+}
+
 /* check for old-style Wow64 (using a 32-bit ntdll.so) */
 static inline BOOL is_old_wow64(void)
 {

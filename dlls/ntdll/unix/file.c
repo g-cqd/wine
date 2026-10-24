@@ -2863,6 +2863,9 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
     struct dir_data *data;
     unsigned int status;
 
+    single_entry = syscall_boolean( &single_entry );
+    restart_scan = syscall_boolean( &restart_scan );
+
     TRACE("(%p %p %p %p %p %p 0x%08x 0x%08x 0x%08x %s 0x%08x\n",
           handle, event, apc_routine, apc_context, io, buffer,
           length, info_class, single_entry, debugstr_us(mask),

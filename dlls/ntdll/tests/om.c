@@ -2861,6 +2861,48 @@ static void test_query_directory(void)
     pNtClose( dir );
 }
 
+#ifdef _WIN64
+/* A caller may write only the low byte of a BOOLEAN stack argument and leave stale data
+ * above it; only the low byte may count, or a FALSE restart restarts every call. */
+static void test_query_directory_boolean_upper_bits(void)
+{
+    NTSTATUS (WINAPI *query)( HANDLE, void *, ULONG, ULONG_PTR, ULONG_PTR, ULONG *, ULONG * ) =
+        (void *)NtQueryDirectoryObject;
+    char buffer[200];
+    DIRECTORY_BASIC_INFORMATION *info = (void *)buffer;
+    HANDLE dir, child1, child2;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING string;
+    ULONG context, size;
+    NTSTATUS status;
+
+    RtlInitUnicodeString( &string, L"\\BaseNamedObjects\\winetest_bool" );
+    InitializeObjectAttributes( &attr, &string, 0, 0, NULL );
+    status = pNtCreateDirectoryObject( &dir, DIRECTORY_QUERY, &attr );
+    ok( !status, "got %#lx\n", status );
+    RtlInitUnicodeString( &string, L"\\BaseNamedObjects\\winetest_bool\\one" );
+    status = NtCreateMutant( &child1, GENERIC_ALL, &attr, FALSE );
+    ok( !status, "got %#lx\n", status );
+    RtlInitUnicodeString( &string, L"\\BaseNamedObjects\\winetest_bool\\two" );
+    status = NtCreateMutant( &child2, GENERIC_ALL, &attr, FALSE );
+    ok( !status, "got %#lx\n", status );
+
+    context = 0;
+    status = query( dir, info, sizeof(buffer), 0xdeadbe01, 0x6fffff2fa000, &context, &size );
+    ok( !status, "got %#lx\n", status );
+    ok( context == 1, "got context %lu\n", context );
+    status = query( dir, info, sizeof(buffer), 0xdeadbe01, 0x6fffff2fa000, &context, &size );
+    ok( !status, "got %#lx\n", status );
+    ok( context == 2, "got context %lu\n", context );
+    status = query( dir, info, sizeof(buffer), 0xdeadbe01, 0x6fffff2fa000, &context, &size );
+    ok( status == STATUS_NO_MORE_ENTRIES, "got %#lx\n", status );
+
+    pNtClose( child1 );
+    pNtClose( child2 );
+    pNtClose( dir );
+}
+#endif
+
 #define test_object_name_with_null(a,b) _test_object_name_with_null(__LINE__,a,b)
 static void _test_object_name_with_null(unsigned line, HANDLE handle, UNICODE_STRING *expect)
 {
@@ -3948,6 +3990,9 @@ START_TEST(om)
     test_globalroot();
     test_object_identity();
     test_query_directory();
+#ifdef _WIN64
+    test_query_directory_boolean_upper_bits();
+#endif
     test_object_permanence();
     test_zero_access();
     test_NtAllocateReserveObject();

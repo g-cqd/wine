@@ -2081,8 +2081,12 @@ NTSTATUS WINAPI NtQueryDirectoryObject( HANDLE handle, DIRECTORY_BASIC_INFORMATI
                                         ULONG *context, ULONG *ret_size )
 {
     unsigned int status, i, count, total_len, pos, used_size, used_count, strpool_head;
-    ULONG index = restart ? 0 : *context;
+    ULONG index;
     struct directory_entry *entries;
+
+    single_entry = syscall_boolean( &single_entry );
+    restart = syscall_boolean( &restart );
+    index = restart ? 0 : *context;
 
     if (!(entries = malloc( size ))) return STATUS_NO_MEMORY;
 
