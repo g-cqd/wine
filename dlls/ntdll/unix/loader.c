@@ -2742,6 +2742,7 @@ static void start_main_thread(void)
         {
             hub_rules_apply( image );
             free( image );
+            hub_rules_fixup_main_image( peb->ImageBaseAddress );
         }
         asprintf( &name, "%s/compatdb.so", ntdll_dir );
         if (name)

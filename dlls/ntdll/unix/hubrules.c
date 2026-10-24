@@ -59,6 +59,11 @@ WINE_DEFAULT_DEBUG_CHANNEL(module);
 #define MAX_IMPORTS     256
 #define MAX_IMPORT_SPAN (64 * 1024)
 #define BASE_ENV        "HUB_RULES_LAUNCHER_COMPATDB"  /* WINE_COMPATDB as the launcher set it */
+#define GATE_KEY        "gate_selector_fixup=true"
+
+/* Set by a detection rule with gate_selector_fixup=true: rewrite the 64-bit code selector of the
+ * Heaven's-gate far jumps in the main image (see hub_rules_fixup_main_image). */
+static BOOL gate_selector_fixup;
 
 struct pe_facts
 {
@@ -253,6 +258,78 @@ static BOOL append_line( char **out, size_t *len, size_t *cap, const char *a, co
     return TRUE;
 }
 
+/* Remove the ';'-separated field equal to setting from the settings string, in place;
+ * returns whether it was there. */
+static BOOL strip_setting( char *settings, const char *setting )
+{
+    size_t len = strlen( setting );
+    char *p = settings;
+
+    while (*p)
+    {
+        char *end = strchr( p, ';' );
+        size_t field = end ? (size_t)(end - p) : strlen( p );
+
+        if (field == len && !strncmp( p, setting, len ))
+        {
+            if (end) memmove( p, end + 1, strlen( end + 1 ) + 1 );
+            else if (p > settings) p[-1] = 0;   /* drop the ';' before the last field */
+            else *p = 0;
+            return TRUE;
+        }
+        if (!end) break;
+        p = end + 1;
+    }
+    return FALSE;
+}
+
+/***********************************************************************
+ *           hub_rules_fixup_main_image
+ *
+ * For an i386 main image that a rule marked with gate_selector_fixup=true,
+ * rewrite `push imm32; ljmp 0x33:imm32` in its executable sections to jump to
+ * the 64-bit code selector of this process. Windows' 64-bit code selector is
+ * 0x33; macOS uses 0x2b and Rosetta stops on a far jump to 0x33 ("invalid gdt
+ * selector index 6"). The image is still unexecuted when this runs.
+ */
+void hub_rules_fixup_main_image( void *base )
+{
+    IMAGE_DOS_HEADER *dos = base;
+    IMAGE_NT_HEADERS32 *nt;
+    IMAGE_SECTION_HEADER *sec;
+    unsigned int i, count = 0;
+    USHORT cs64;
+
+    if (!gate_selector_fixup || !base || dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+    nt = (IMAGE_NT_HEADERS32 *)((char *)base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_I386) return;
+    __asm__( "movw %%cs,%0" : "=r" (cs64) );
+    if (cs64 == 0x33) return;
+
+    sec = IMAGE_FIRST_SECTION( nt );
+    for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
+    {
+        BYTE *start = (BYTE *)base + sec[i].VirtualAddress, *p;
+        SIZE_T size = min( sec[i].Misc.VirtualSize, sec[i].SizeOfRawData ), prot_size = size;
+        void *prot_addr = start;
+        ULONG old;
+
+        if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) || size < 12) continue;
+        if (NtProtectVirtualMemory( NtCurrentProcess(), &prot_addr, &prot_size, PAGE_EXECUTE_READWRITE, &old ))
+            continue;
+        /* 68 imm32 EA imm32 33 00 */
+        for (p = start; p + 12 <= start + size; p++)
+        {
+            if (p[0] != 0x68 || p[5] != 0xea || p[10] != 0x33 || p[11] != 0) continue;
+            p[10] = cs64;
+            count++;
+            p += 11;
+        }
+        NtProtectVirtualMemory( NtCurrentProcess(), &prot_addr, &prot_size, old, &old );
+    }
+    fprintf( stderr, "hubrules: rewrote %u far jump(s) to selector 0x33 into 0x%x\n", count, cs64 );
+}
+
 /***********************************************************************
  *           hub_rules_apply
  *
@@ -301,12 +378,14 @@ void hub_rules_apply( const char *unix_path )
         if (!predicates_hold( line + 5, exe, &facts, have_facts )) continue;
         arrow += 2;
         while (*arrow == ' ') arrow++;
+        matched++;
+        fprintf( stderr, "hubrules: %s matches line %u: %s\n", exe, lineno, arrow );
+        if (strip_setting( arrow, GATE_KEY )) gate_selector_fixup = TRUE;
+        if (!*arrow) continue;  /* only runtime capabilities, nothing for compatdb */
         snprintf( tag, sizeof(tag), "name=hubrules-%u;exe=", lineno );
         if (!append_line( &out, &len, &cap, tag, exe, "" ) ) goto done;
         len--;  /* continue the same line with the settings */
         if (!append_line( &out, &len, &cap, ";", arrow, "" )) goto done;
-        matched++;
-        fprintf( stderr, "hubrules: %s matches line %u: %s\n", exe, lineno, arrow );
     }
 
     /* the launcher's rules last, without its own "v=" header line */
