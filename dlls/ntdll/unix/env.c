@@ -1761,6 +1761,57 @@ static void load_global_options( const UNICODE_STRING *image )
 }
 
 
+/***********************************************************************
+ *		set_process_env_var
+ *
+ * Set a variable in the environment block of the process parameters, and in
+ * the WoW64 copy when there is one, before any PE code has read them. value
+ * is UTF-8; NULL removes the variable.
+ */
+void set_process_env_var( const char *name, const char *value )
+{
+    RTL_USER_PROCESS_PARAMETERS *params = peb->ProcessParameters;
+    SIZE_T pos, size, alloc;
+    WCHAR *env, *valueW = NULL, *block = NULL;
+    DWORD len;
+
+    if (!params || !params->Environment) return;
+    pos = params->EnvironmentSize / sizeof(WCHAR);
+    while (pos > 1 && !params->Environment[pos - 1] && !params->Environment[pos - 2]) pos--;  /* drop the final NUL */
+    size = pos + 256;
+    if (!(env = malloc( size * sizeof(WCHAR) ))) return;
+    memcpy( env, params->Environment, pos * sizeof(WCHAR) );
+    if (value)
+    {
+        len = strlen( value );
+        if (!(valueW = malloc( (len + 1) * sizeof(WCHAR) ))) goto done;
+        valueW[ntdll_umbstowcs( value, len, valueW, len )] = 0;
+    }
+    append_envW( &env, &pos, &size, name, valueW );
+    if (pos + 1 > size && !(env = realloc( env, (pos + 1) * sizeof(WCHAR) ))) goto done;
+    env[pos++] = 0;
+
+    alloc = pos * sizeof(WCHAR);
+    /* below 2 GB, so that the WoW64 parameters can point to it */
+    if (NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&block, limit_2g - 1, &alloc,
+                                 MEM_COMMIT, PAGE_READWRITE )) goto done;
+    memcpy( block, env, pos * sizeof(WCHAR) );
+    params->Environment = block;
+    params->EnvironmentSize = pos * sizeof(WCHAR);
+#ifdef _WIN64
+    if (wow_peb && wow_peb->ProcessParameters)
+    {
+        RTL_USER_PROCESS_PARAMETERS32 *wow64_params = ULongToPtr( wow_peb->ProcessParameters );
+        wow64_params->Environment = PtrToUlong( block );
+        wow64_params->EnvironmentSize = pos * sizeof(WCHAR);
+    }
+#endif
+done:
+    free( valueW );
+    free( env );
+}
+
+
 /*************************************************************************
  *		build_wow64_parameters
  */

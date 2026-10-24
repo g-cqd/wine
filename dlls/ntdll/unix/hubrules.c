@@ -340,7 +340,7 @@ void hub_rules_fixup_main_image( void *base )
 void hub_rules_apply( const char *unix_path )
 {
     struct pe_facts facts;
-    const char *exe, *base;
+    const char *exe, *base, *launcher;
     char *rules, *line, *next, *arrow, *out = NULL, tag[32];
     size_t len = 0, cap = 0;
     unsigned int lineno = 0, matched = 0;
@@ -359,6 +359,7 @@ void hub_rules_apply( const char *unix_path )
         setenv( BASE_ENV, base ? base : "", 1 );
         base = getenv( BASE_ENV );
     }
+    launcher = base;
 
     if (!append_line( &out, &len, &cap, "v=3", "", "" )) goto done;
     for (line = rules; line; line = next)
@@ -397,6 +398,13 @@ void hub_rules_apply( const char *unix_path )
     }
     if (len && out[len - 1] == '\n') out[--len] = 0;
     setenv( "WINE_COMPATDB", out, 1 );
+    /* compatdb.so reads the Windows environment block of the process, which a child started by
+     * another process (a service, for one) inherits without these rules: set it there as well */
+    if (peb && peb->ProcessParameters)
+    {
+        set_process_env_var( BASE_ENV, launcher ? launcher : "" );
+        set_process_env_var( "WINE_COMPATDB", out );
+    }
     TRACE( "%s: %u detection rule(s) matched\n", debugstr_a(exe), matched );
 
 done:
