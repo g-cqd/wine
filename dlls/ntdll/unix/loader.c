@@ -917,6 +917,7 @@ static char *query_compatdb_preinit( const char *path, int *x87 )
 
     if (x87) *x87 = -1;
     if (!ntdll_dir) return NULL;
+    hub_rules_apply( path );
     asprintf( &name, "%s/compatdb.so", ntdll_dir );
     if (!name) return NULL;
     compatdb_preinit = 1;
@@ -2733,8 +2734,15 @@ static void start_main_thread(void)
 
     /* CW Hack 24067 */
     {
-        char *name = NULL;
+        char *name = NULL, *image = NULL;
 
+        /* the runtime rules for this executable go into WINE_COMPATDB before compatdb.so reads it */
+        if (peb->ProcessParameters && peb->ProcessParameters->ImagePathName.Buffer &&
+            !ntdll_get_unix_file_name( peb->ProcessParameters->ImagePathName.Buffer, &image, FILE_OPEN ))
+        {
+            hub_rules_apply( image );
+            free( image );
+        }
         asprintf( &name, "%s/compatdb.so", ntdll_dir );
         if (name)
         {

@@ -51,6 +51,7 @@ SOURCES = \
 	unix/env.c \
 	unix/file.c \
 	unix/msync.c \
+	unix/hubrules.c \
 	unix/loader.c \
 	unix/loadorder.c \
 	unix/process.c \
