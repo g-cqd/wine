@@ -388,6 +388,7 @@ NTSTATUS WINAPI NtTraceControl( ULONG code, void *inbuf, ULONG inbuf_len,
  */
 NTSTATUS WINAPI NtSetDebugFilterState( ULONG component_id, ULONG level, BOOLEAN state )
 {
+    state = syscall_boolean( &state );
     FIXME( "component_id %#x, level %u, state %#x stub.\n", component_id, level, state );
 
     return STATUS_SUCCESS;

@@ -7019,6 +7019,9 @@ NTSTATUS WINAPI NtLockFile( HANDLE file, HANDLE event, PIO_APC_ROUTINE apc, void
     HANDLE handle;
     BOOLEAN async;
 
+    dont_wait = syscall_boolean( &dont_wait );
+    exclusive = syscall_boolean( &exclusive );
+
     if (apc || io_status || key)
     {
         FIXME("Unimplemented yet parameter\n");
@@ -7189,6 +7192,8 @@ NTSTATUS WINAPI NtNotifyChangeDirectoryFile( HANDLE handle, HANDLE event, PIO_AP
     struct async_fileio_read_changes *fileio;
     unsigned int status;
     ULONG size = max( 4096, buffer_size );
+
+    subtree = syscall_boolean( &subtree );
 
     TRACE( "%p %p %p %p %p %p %u %u %d\n",
            handle, event, apc, apc_context, iosb, buffer, buffer_size, filter, subtree );
@@ -7694,6 +7699,9 @@ NTSTATUS WINAPI NtQueryEaFile( HANDLE handle, IO_STATUS_BLOCK *io, void *buffer,
 {
     int fd, needs_close;
     NTSTATUS status;
+
+    single_entry = syscall_boolean( &single_entry );
+    restart = syscall_boolean( &restart );
 
     FIXME( "(%p,%p,%p,%d,%d,%p,%d,%p,%d) semi-stub\n",
            handle, io, buffer, length, single_entry, list, list_len, index, restart );

@@ -186,7 +186,7 @@ NTSTATUS WINAPI NtOpenProcessTokenEx( HANDLE process, DWORD access, DWORD attrib
  */
 NTSTATUS WINAPI NtOpenThreadToken( HANDLE thread, DWORD access, BOOLEAN self, HANDLE *handle )
 {
-    return NtOpenThreadTokenEx( thread, access, self, 0, handle );
+    return NtOpenThreadTokenEx( thread, access, syscall_boolean( &self ), 0, handle );
 }
 
 
@@ -197,6 +197,8 @@ NTSTATUS WINAPI NtOpenThreadTokenEx( HANDLE thread, DWORD access, BOOLEAN self, 
                                      HANDLE *handle )
 {
     unsigned int ret;
+
+    self = syscall_boolean( &self );
 
     TRACE( "(%p,0x%08x,%u,0x%08x,%p)\n", thread, access, self, attributes, handle );
 
@@ -228,6 +230,7 @@ NTSTATUS WINAPI NtDuplicateToken( HANDLE token, ACCESS_MASK access, OBJECT_ATTRI
     data_size_t len;
     struct object_attributes *objattr;
 
+    effective_only = syscall_boolean( &effective_only );
     if (effective_only)
         FIXME( "ignoring effective-only flag\n" );
 
@@ -751,6 +754,7 @@ NTSTATUS WINAPI NtCreateLowBoxToken( HANDLE *token_handle, HANDLE token, ACCESS_
 NTSTATUS WINAPI NtAdjustGroupsToken( HANDLE token, BOOLEAN reset, TOKEN_GROUPS *groups,
                                      ULONG length, TOKEN_GROUPS *prev, ULONG *retlen )
 {
+    reset = syscall_boolean( &reset );
     FIXME( "%p %d %p %u %p %p\n", token, reset, groups, length, prev, retlen );
     return STATUS_NOT_IMPLEMENTED;
 }
@@ -763,6 +767,8 @@ NTSTATUS WINAPI NtAdjustPrivilegesToken( HANDLE token, BOOLEAN disable, TOKEN_PR
                                          DWORD length, TOKEN_PRIVILEGES *prev, DWORD *retlen )
 {
     unsigned int ret;
+
+    disable = syscall_boolean( &disable );
 
     TRACE( "(%p,0x%08x,%p,0x%08x,%p,%p)\n", token, disable, privs, length, prev, retlen );
 
@@ -947,6 +953,7 @@ NTSTATUS WINAPI NtAccessCheckAndAuditAlarm( UNICODE_STRING *subsystem, HANDLE ha
                                             ACCESS_MASK *access_granted, NTSTATUS *access_status,
                                             BOOLEAN *onclose )
 {
+    creation = syscall_boolean( &creation );
     FIXME( "(%s, %p, %s, %p, 0x%08x, %p, %d, %p, %p, %p), stub\n",
            debugstr_us(subsystem), handle, debugstr_us(typename), descr, access,
            mapping, creation, access_granted, access_status, onclose );
@@ -966,6 +973,7 @@ NTSTATUS WINAPI NtAccessCheckByTypeAndAuditAlarm( UNICODE_STRING *subsystem, HAN
                                                   ACCESS_MASK *access_granted, NTSTATUS *access_status,
                                                   BOOLEAN *onclose )
 {
+    creation = syscall_boolean( &creation );
     FIXME( "(%s, %p, %s, %s, %p, 0x%08x, %u, %x, %p, %u, %p, %d, %p, %p, %p), stub\n",
            debugstr_us(subsystem), handle, debugstr_us(typename), debugstr_us(objectname),
            descr, access, audit_type, flags, obj_list, list_len,
@@ -979,6 +987,7 @@ NTSTATUS WINAPI NtAccessCheckByTypeAndAuditAlarm( UNICODE_STRING *subsystem, HAN
  */
 NTSTATUS WINAPI NtCloseObjectAuditAlarm( UNICODE_STRING *subsystem, HANDLE handle, BOOLEAN onclose )
 {
+    onclose = syscall_boolean( &onclose );
     FIXME( "%s %p %u: stub\n", debugstr_us(subsystem), handle, onclose );
     return STATUS_NOT_IMPLEMENTED;
 }

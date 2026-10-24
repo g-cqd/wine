@@ -4688,6 +4688,7 @@ NTSTATUS WINAPI NtRaiseHardError( NTSTATUS status, ULONG count,
 NTSTATUS WINAPI NtInitiatePowerAction( POWER_ACTION action, SYSTEM_POWER_STATE state,
                                        ULONG flags, BOOLEAN async )
 {
+    async = syscall_boolean( &async );
     FIXME( "(%d,%d,0x%08x,%d),stub\n", action, state, flags, async );
     return STATUS_NOT_IMPLEMENTED;
 }

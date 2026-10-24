@@ -1188,6 +1188,7 @@ NTSTATUS WINAPI GPT_IMPORT(NtCreateEvent)( HANDLE *handle, ACCESS_MASK access, c
     data_size_t len;
     struct object_attributes *objattr;
 
+    state = syscall_boolean( &state );
     TRACE( "access %#x, name %s, type %u, state %u\n", access,
            attr ? debugstr_us(attr->ObjectName) : "(null)", type, state );
 
@@ -1438,6 +1439,7 @@ NTSTATUS WINAPI NtCreateMutant( HANDLE *handle, ACCESS_MASK access, const OBJECT
     data_size_t len;
     struct object_attributes *objattr;
 
+    owned = syscall_boolean( &owned );
     TRACE( "access %#x, name %s, owned %u\n", access,
            attr ? debugstr_us(attr->ObjectName) : "(null)", owned );
 
@@ -1979,6 +1981,8 @@ NTSTATUS WINAPI NtWaitForDebugEvent( HANDLE handle, BOOLEAN alertable, LARGE_INT
     unsigned int ret;
     BOOL wait = TRUE;
 
+    alertable = syscall_boolean( &alertable );
+
     for (;;)
     {
         SERVER_START_REQ( wait_debug_event )
@@ -2365,6 +2369,8 @@ NTSTATUS WINAPI NtSetTimer( HANDLE handle, const LARGE_INTEGER *when, PTIMER_APC
 {
     unsigned int ret = STATUS_SUCCESS;
 
+    resume = syscall_boolean( &resume );
+
     TRACE( "(%p,%p,%p,%p,%08x,0x%08x,%p)\n", handle, when, callback, arg, resume, period, state );
 
     SERVER_START_REQ( set_timer )
@@ -2464,6 +2470,8 @@ NTSTATUS WINAPI NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, WA
     UINT i, flags = SELECT_INTERRUPTIBLE;
     unsigned int ret;
 
+    alertable = syscall_boolean( &alertable );
+
     if (!count || count > MAXIMUM_WAIT_OBJECTS) return STATUS_INVALID_PARAMETER_1;
     if (type != WaitAll && type != WaitAny) FIXME( "Unsupported wait type %u\n", type );
 
@@ -2504,6 +2512,8 @@ NTSTATUS WINAPI NtWaitForSingleObject( HANDLE handle, BOOLEAN alertable, const L
     UINT flags = SELECT_INTERRUPTIBLE;
     unsigned int ret;
 
+    alertable = syscall_boolean( &alertable );
+
     TRACE( "handle %p, alertable %u, timeout %s\n", handle, alertable, debugstr_timeout(timeout) );
 
     if ((ret = inproc_wait( 1, &handle, WaitAny, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
@@ -2530,6 +2540,8 @@ NTSTATUS WINAPI NtSignalAndWaitForSingleObject( HANDLE signal, HANDLE wait,
     union select_op select_op;
     UINT flags = SELECT_INTERRUPTIBLE;
     NTSTATUS ret;
+
+    alertable = syscall_boolean( &alertable );
 
     TRACE( "signal %p, wait %p, alertable %u, timeout %s\n", signal, wait, alertable, debugstr_timeout(timeout) );
 
@@ -2576,6 +2588,8 @@ NTSTATUS WINAPI NtYieldExecution(void)
 NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeout )
 {
     unsigned int status = STATUS_SUCCESS;
+
+    alertable = syscall_boolean( &alertable );
 
     /* if alertable, we need to query the server */
     if (alertable)
@@ -2707,6 +2721,8 @@ NTSTATUS WINAPI NtSetTimerResolution( ULONG res, BOOLEAN set, ULONG *current_res
 {
     static BOOL has_request = FALSE;
 
+    set = syscall_boolean( &set );
+
     TRACE( "(%u,%u,%p), semi-stub!\n", res, set, current_res );
 
     /* Wine has no support for anything other that 1 ms and does not keep of
@@ -2835,6 +2851,8 @@ NTSTATUS WINAPI NtWaitForKeyedEvent( HANDLE handle, const void *key,
     union select_op select_op;
     UINT flags = SELECT_INTERRUPTIBLE;
 
+    alertable = syscall_boolean( &alertable );
+
     TRACE( "handle %p, key %p, alertable %u, timeout %s\n", handle, key, alertable, debugstr_timeout(timeout) );
 
     if (!handle) handle = keyed_event;
@@ -2855,6 +2873,8 @@ NTSTATUS WINAPI NtReleaseKeyedEvent( HANDLE handle, const void *key,
 {
     union select_op select_op;
     UINT flags = SELECT_INTERRUPTIBLE;
+
+    alertable = syscall_boolean( &alertable );
 
     TRACE( "handle %p, key %p, alertable %u, timeout %s\n", handle, key, alertable, debugstr_timeout(timeout) );
 
@@ -3031,6 +3051,8 @@ NTSTATUS WINAPI NtRemoveIoCompletionEx( HANDLE handle, FILE_IO_COMPLETION_INFORM
     HANDLE wait_handle = NULL;
     unsigned int status;
     ULONG i = 0;
+
+    alertable = syscall_boolean( &alertable );
 
     TRACE( "%p %p %u %p %p %u\n", handle, info, count, written, timeout, alertable );
 
@@ -3272,6 +3294,7 @@ NTSTATUS WINAPI NtListenPort( HANDLE handle, LPC_MESSAGE *msg )
 NTSTATUS WINAPI NtAcceptConnectPort( HANDLE *handle, ULONG id, LPC_MESSAGE *msg, BOOLEAN accept,
                                      LPC_SECTION_WRITE *write, LPC_SECTION_READ *read )
 {
+    accept = syscall_boolean( &accept );
     FIXME("(%p,%u,%p,%d,%p,%p),stub!\n", handle, id, msg, accept, write, read );
     return STATUS_NOT_IMPLEMENTED;
 }
@@ -3847,6 +3870,7 @@ NTSTATUS WINAPI NtCreateTransaction( HANDLE *handle, ACCESS_MASK mask, OBJECT_AT
  */
 NTSTATUS WINAPI NtCommitTransaction( HANDLE transaction, BOOLEAN wait )
 {
+    wait = syscall_boolean( &wait );
     FIXME( "%p, %d stub.\n", transaction, wait );
 
     return STATUS_SUCCESS;
@@ -3857,6 +3881,7 @@ NTSTATUS WINAPI NtCommitTransaction( HANDLE transaction, BOOLEAN wait )
  */
 NTSTATUS WINAPI NtRollbackTransaction( HANDLE transaction, BOOLEAN wait )
 {
+    wait = syscall_boolean( &wait );
     FIXME( "%p, %d stub.\n", transaction, wait );
 
     return STATUS_ACCESS_VIOLATION;

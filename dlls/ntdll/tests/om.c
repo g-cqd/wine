@@ -2900,6 +2900,21 @@ static void test_query_directory_boolean_upper_bits(void)
     pNtClose( child1 );
     pNtClose( child2 );
     pNtClose( dir );
+
+    {
+        NTSTATUS (WINAPI *set_locale)( ULONG_PTR, LCID ) = (void *)NtSetDefaultLocale;
+        NTSTATUS (WINAPI *query_locale)( ULONG_PTR, LCID * ) = (void *)NtQueryDefaultLocale;
+        LCID orig_user = 0, lcid = 0;
+
+        status = query_locale( 1, &orig_user );
+        ok( !status, "got %#lx\n", status );
+        status = set_locale( 1, 0x040c );
+        ok( !status, "got %#lx\n", status );
+        status = query_locale( 0x6fffff2fa000, &lcid );
+        ok( !status, "got %#lx\n", status );
+        ok( lcid != 0x040c, "got user locale %#lx for FALSE user\n", lcid );
+        set_locale( 1, orig_user );
+    }
 }
 #endif
 

@@ -2315,6 +2315,7 @@ NTSTATUS WINAPI NtInitializeNlsFiles( void **ptr, LCID *lcid, LARGE_INTEGER *siz
  */
 NTSTATUS WINAPI NtQueryDefaultLocale( BOOLEAN user, LCID *lcid )
 {
+    user = syscall_boolean( &user );
     *lcid = user ? user_lcid : system_lcid;
     return STATUS_SUCCESS;
 }
@@ -2325,6 +2326,7 @@ NTSTATUS WINAPI NtQueryDefaultLocale( BOOLEAN user, LCID *lcid )
  */
 NTSTATUS WINAPI NtSetDefaultLocale( BOOLEAN user, LCID lcid )
 {
+    user = syscall_boolean( &user );
     if (user) user_lcid = lcid;
     else system_lcid = lcid;
     return STATUS_SUCCESS;
