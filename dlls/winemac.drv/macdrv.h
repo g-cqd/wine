@@ -246,6 +246,7 @@ extern BOOL query_resize_start(HWND hwnd);
 extern BOOL query_min_max_info(HWND hwnd);
 
 extern void macdrv_mouse_button(HWND hwnd, const macdrv_event *event);
+extern void macdrv_send_extra_button_as_key(HWND hwnd, int button, BOOL pressed, unsigned int time);
 extern void macdrv_mouse_moved(HWND hwnd, const macdrv_event *event);
 extern void macdrv_mouse_scroll(HWND hwnd, const macdrv_event *event);
 extern void macdrv_release_capture(HWND hwnd, const macdrv_event *event);

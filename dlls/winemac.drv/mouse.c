@@ -893,6 +893,13 @@ void macdrv_mouse_button(HWND hwnd, const macdrv_event *event)
           event->mouse_button.x, event->mouse_button.y,
           event->mouse_button.time_ms, (NtGetTickCount() - event->mouse_button.time_ms));
 
+    if (event->mouse_button.button >= 5)
+    {
+        macdrv_send_extra_button_as_key(hwnd, event->mouse_button.button, event->mouse_button.pressed,
+                                        event->mouse_button.time_ms);
+        return;
+    }
+
     if (event->mouse_button.pressed)
     {
         switch (event->mouse_button.button)

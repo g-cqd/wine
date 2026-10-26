@@ -918,6 +918,31 @@ static void macdrv_send_keyboard_input(HWND hwnd, WORD vkey, WORD scan, unsigned
 
 
 /***********************************************************************
+ *              macdrv_send_extra_button_as_key
+ *
+ * Windows has only five mouse buttons. A mouse that reports more (macOS buttons 5 and up) gets
+ * them as F13, F14, ... so that a program can bind them like any other key.
+ */
+void macdrv_send_extra_button_as_key(HWND hwnd, int button, BOOL pressed, unsigned int time)
+{
+    /* the scan codes are the ones the key table above gives kVK_F13 to kVK_F20 */
+    static const struct { WORD vkey, scan; } keys[] =
+    {
+        { VK_F13, 0x64 }, { VK_F14, 0x65 }, { VK_F15, 0x66 }, { VK_F16, 0x67 },
+        { VK_F17, 0x68 }, { VK_F18, 0x69 }, { VK_F19, 0x6A }, { VK_F20, 0x6B },
+    };
+    int index = button - 5;
+
+    if (index < 0 || index >= ARRAY_SIZE(keys))
+    {
+        TRACE("mouse button %d has no key\n", button);
+        return;
+    }
+    macdrv_send_keyboard_input(hwnd, keys[index].vkey, keys[index].scan, pressed ? 0 : KEYEVENTF_KEYUP, time);
+}
+
+
+/***********************************************************************
  *           update_modifier_state
  */
 static void update_modifier_state(unsigned int modifier, unsigned int modifiers, const BYTE *keystate,
