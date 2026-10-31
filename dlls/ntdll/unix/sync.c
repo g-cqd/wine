@@ -273,13 +273,13 @@ unsigned int alloc_object_attributes( const OBJECT_ATTRIBUTES *attr, struct obje
         if (sacl) descr->sacl_len = sacl->AclSize;
         if (dacl) descr->dacl_len = dacl->AclSize;
 
-        memcpy( ptr, owner, descr->owner_len );
+        if (owner) memcpy( ptr, owner, descr->owner_len );
         ptr += descr->owner_len;
-        memcpy( ptr, group, descr->group_len );
+        if (group) memcpy( ptr, group, descr->group_len );
         ptr += descr->group_len;
-        memcpy( ptr, sacl, descr->sacl_len );
+        if (sacl) memcpy( ptr, sacl, descr->sacl_len );
         ptr += descr->sacl_len;
-        memcpy( ptr, dacl, descr->dacl_len );
+        if (dacl) memcpy( ptr, dacl, descr->dacl_len );
         (*ret)->sd_len = (sizeof(*descr) + descr->owner_len + descr->group_len + descr->sacl_len +
                           descr->dacl_len + sizeof(WCHAR) - 1) & ~(sizeof(WCHAR) - 1);
     }
