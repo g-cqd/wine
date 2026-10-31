@@ -411,6 +411,7 @@ static VkResult convert_instance_create_info( struct mempool *pool, VkInstanceCr
     const VkDebugReportCallbackCreateInfoEXT *debug_report_callback;
     const char **extensions;
     uint32_t count = 0;
+    BOOL win32_surface;
 
     while ((header = find_next_struct( header->pNext, VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT )))
     {
@@ -437,6 +438,8 @@ static VkResult convert_instance_create_info( struct mempool *pool, VkInstanceCr
         return VK_ERROR_LAYER_NOT_PRESENT;
     }
 
+    /* read before the win32 surface extension is mapped to the host one below */
+    win32_surface = instance->obj.extensions.has_VK_KHR_win32_surface;
     driver_funcs->p_map_instance_extensions( &instance->obj.extensions );
     instance->obj.extensions.has_VK_KHR_win32_surface = 0;
 
@@ -446,7 +449,7 @@ static VkResult convert_instance_create_info( struct mempool *pool, VkInstanceCr
         pthread_rwlock_init( &instance->objects_lock, NULL );
     }
 
-    if (instance->obj.extensions.has_VK_KHR_win32_surface && vulkan_funcs.host_extensions.has_VK_EXT_surface_maintenance1)
+    if (win32_surface && vulkan_funcs.host_extensions.has_VK_EXT_surface_maintenance1)
         instance->obj.extensions.has_VK_EXT_surface_maintenance1 = 1;
     if (use_external_memory())
     {
@@ -1885,11 +1888,14 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
      */
     if (get_surface_rect( surface->hwnd, &client_rect, NtUserGetWinMonitorDpi( surface->hwnd, MDT_RAW_DPI ) ) &&
         instance->extensions.has_VK_EXT_surface_maintenance1 &&
-        physical_device->extensions.has_VK_KHR_swapchain_maintenance1)
+        physical_device->extensions.has_VK_EXT_swapchain_maintenance1) /* the variant convert_device_create_info enables;
+                                                                           winevulkan doesn't expose the KHR one */
     {
         scaling.scalingBehavior = VK_PRESENT_SCALING_STRETCH_BIT_EXT;
+        scaling.pNext = (void *)create_info_host.pNext; /* keep the program's own chain */
         create_info_host.pNext = &scaling;
     }
+    else WARN( "No present scaling for swapchain on %p, MoltenVK may report VK_SUBOPTIMAL_KHR on every present\n", surface->hwnd );
 
     if (!(swapchain = calloc( 1, sizeof(*swapchain) ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
