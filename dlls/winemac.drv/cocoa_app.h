@@ -88,6 +88,8 @@ enum {
     BOOL        cursorIsCurrent;
     BOOL        cursorHidden;
     BOOL        clientWantsCursorHidden;
+    BOOL        win32ClipsCursor;       /* the cursor clip comes from ClipCursor */
+    BOOL        implicitCursorClip;     /* the cursor clip is ours: hidden cursor in a full-screen space */
 
     NSTimeInterval lastSetCursorPositionTime;
 
@@ -145,6 +147,9 @@ enum {
     - (void) adjustWindowLevels;
     - (void) prepareToMiniaturize;
     - (void) updateFullscreenWindows;
+    - (void) updateImplicitCursorClip;
+    - (void) updateFullscreenPresentation:(BOOL)active;
+    - (BOOL) clipCursorForWin32:(BOOL)clipping rect:(CGRect)rect;
 
     - (BOOL) handleEvent:(NSEvent*)anEvent;
     - (void) didSendEvent:(NSEvent*)anEvent;

@@ -92,6 +92,7 @@
        fullScreenWineFrame, and the content is scaled to fit. */
     BOOL wantsNativeFullScreen;       /* Win32 asked for the space */
     BOOL inAutoFullScreen;            /* we entered the space for Win32 */
+    BOOL minimizedInSpace;            /* Win32 minimized it while the app was inactive; it stays in its space */
     BOOL suppressAutoFullScreen;      /* the user left it; don't re-enter */
     NSRect fullScreenWineFrame;       /* frame Win32 set, Cocoa coordinates */
     NSRect fullScreenSourceRect;      /* mask rect in content coordinates, or empty */
@@ -132,6 +133,7 @@
        points) between where the content shows on screen and where Win32
        placed it, while the window is scaled in a native full-screen space. */
     - (BOOL) isScaledInFullScreen;
+    - (BOOL) isInAutoFullScreen;
     - (CGPoint) winePointFromScreenPoint:(CGPoint)point;
     - (CGPoint) screenPointFromWinePoint:(CGPoint)point;
     - (CGFloat) wineUnitsPerScreenUnit;

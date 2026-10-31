@@ -195,6 +195,7 @@ struct macdrv_win_data
     unsigned int        minimized : 1;          /* is window minimized? */
     unsigned int        fullscreen : 1;         /* is the window visible rect fullscreen? (unrelated to native AppKit/Cocoa fullscreen) */
     unsigned int        native_fullscreen : 1;  /* was the Cocoa window asked to enter a native full-screen space? */
+    unsigned int        covers_monitor : 1;     /* does the visible rect cover its monitor (decorations off screen)? */
 
     /* CW HACK 22435 */
     CFMutableArrayRef   d3dmetal_client_surfaces;

@@ -120,6 +120,12 @@ static struct macdrv_window_features get_cocoa_window_features(struct macdrv_win
     if (ex_style & WS_EX_NOACTIVATE) wf.prevents_app_activation = TRUE;
     if (EqualRect(&data->rects.window, &data->rects.visible)) return wf;
 
+    /* A top-level window whose client area fills its monitor, with its caption and borders placed off screen,
+     * is how many games present "full screen" with a decorated window; on Windows nothing of the frame shows.
+     * A Cocoa title bar would make AppKit keep the window below the menu bar, shifting the content (and every
+     * click) down and showing the desktop under it, and keep it out of a native full-screen space. */
+    if (data->covers_monitor && !(style & WS_CHILD)) return wf;
+
     /* CrossOver Hack #16933 */
     if (is_main_quicken_window(data->hwnd))
     {
@@ -1537,6 +1543,19 @@ UINT macdrv_ShowWindow(HWND hwnd, INT cmd, RECT *rect, UINT swp)
     macdrv_get_cocoa_window_frame(data->cocoa_window, &frame);
     *rect = rect_from_cgrect(frame);
     *rect = window_rect_from_visible(&data->rects, *rect);
+    /* The frame is in raw (monitor) pixels; win32u passes the rect on to NtUserSetWindowPos in the window's
+       coordinates.  Unconverted, a DPI-unaware program restored from minimized on a Retina display got a
+       window twice the size of the screen (5120x2880 read as 2560x1440 units, scaled up again). */
+    {
+        UINT raw_dpi = NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI), dpi = NtUserGetDpiForWindow(hwnd);
+        if (raw_dpi && dpi && raw_dpi != dpi)
+        {
+            rect->left = (LONG)((LONGLONG)rect->left * dpi / raw_dpi);
+            rect->top = (LONG)((LONGLONG)rect->top * dpi / raw_dpi);
+            rect->right = (LONG)((LONGLONG)rect->right * dpi / raw_dpi);
+            rect->bottom = (LONG)((LONGLONG)rect->bottom * dpi / raw_dpi);
+        }
+    }
     TRACE("rect %s -> %s\n", wine_dbgstr_cgrect(frame), wine_dbgstr_rect(rect));
     swp &= ~(SWP_NOMOVE | SWP_NOCLIENTMOVE | SWP_NOSIZE | SWP_NOCLIENTSIZE);
 
@@ -1692,8 +1711,11 @@ static BOOL wants_native_fullscreen(struct macdrv_win_data *data, BOOL fullscree
 {
     DWORD ex_style;
 
-    if (fullscreen_mode != FULLSCREEN_MODE_NATIVE || !fullscreen) return FALSE;
-    if (style & (WS_MINIMIZE | WS_CHILD)) return FALSE;
+    if (fullscreen_mode != FULLSCREEN_MODE_NATIVE) return FALSE;
+    /* A game minimizes itself when it loses focus: it keeps its space (see -[WineWindow
+       setMacDrvState:]), rather than leaving and re-entering it on every focus change. */
+    if (style & WS_MINIMIZE) return data->native_fullscreen;
+    if (!fullscreen || (style & WS_CHILD)) return FALSE;
     if (data->hwnd == NtUserGetDesktopWindow()) return FALSE;
     if (NtUserGetWindowRelative(data->hwnd, GW_OWNER)) return FALSE;
 
@@ -1722,6 +1744,7 @@ void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT
 
     old_rects = data->rects;
     data->rects = *new_rects;
+    data->covers_monitor = fullscreen && !EqualRect(&new_rects->window, &new_rects->visible);
 
     TRACE("win %p/%p new_rects %s style %08x flags %08x surface %p\n", hwnd, data->cocoa_window,
           debugstr_window_rects(new_rects), new_style, swp_flags, surface);

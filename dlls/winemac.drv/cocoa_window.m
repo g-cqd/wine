@@ -1297,6 +1297,11 @@ static NSString* metal_layer_filter(BOOL mode)
         return wantsNativeFullScreen && !suppressAutoFullScreen && [self.contentView hasAcceleratedContent];
     }
 
+    - (BOOL) isInAutoFullScreen
+    {
+        return inAutoFullScreen && ([self styleMask] & NSWindowStyleMaskFullScreen);
+    }
+
     - (BOOL) isScaledInFullScreen
     {
         return inAutoFullScreen;
@@ -1613,7 +1618,16 @@ static NSString* metal_layer_filter(BOOL mode)
             {
                 if ([self wouldBeVisible])
                 {
-                    if (([self styleMask] & NSWindowStyleMaskFullScreen) || stage_manager_enabled())
+                    if ([self isInAutoFullScreen] && !stage_manager_enabled())
+                    {
+                        /* A full-screen game minimizes itself when it loses focus, as it does on Windows.
+                           A window in a full-screen space can't miniaturize, and refusing the minimize
+                           (below) made the program restore and minimize again on every focus change, the
+                           space exiting and re-entering each time.  Leave it in its space, out of view
+                           anyway, and restore it when it becomes key again. */
+                        minimizedInSpace = TRUE;
+                    }
+                    else if (([self styleMask] & NSWindowStyleMaskFullScreen) || stage_manager_enabled())
                     {
                         [self postDidUnminimizeEvent];
                         discard &= ~event_mask_for_type(WINDOW_DID_UNMINIMIZE);
@@ -1638,6 +1652,8 @@ static NSString* metal_layer_filter(BOOL mode)
                 else
                     pendingMinimize = TRUE;
             }
+            else if (!state->minimized && minimizedInSpace)
+                minimizedInSpace = FALSE;
             else if (!state->minimized && [self isMiniaturized])
             {
                 ignore_windowDeminiaturize = TRUE;
@@ -3366,7 +3382,15 @@ static NSString* metal_layer_filter(BOOL mode)
 
         /* CrossOver Hack #18896: don't return here based on causing_becomeKeyWindow */
 
+        if (minimizedInSpace)
+        {
+            minimizedInSpace = FALSE;
+            [self postDidUnminimizeEvent];
+        }
+
         [controller windowGotFocus:self];
+        [controller updateImplicitCursorClip];
+        [controller updateFullscreenPresentation:[NSApp isActive]];
     }
 
     - (void) windowDidChangeOcclusionState:(NSNotification*)notification
@@ -3420,6 +3444,9 @@ static NSString* metal_layer_filter(BOOL mode)
 
     - (void) windowDidEnterFullScreen:(NSNotification*)notification
     {
+        [[WineApplicationController sharedController] updateFullscreenPresentation:[NSApp isActive]];
+        [[WineApplicationController sharedController] performSelector:@selector(updateImplicitCursorClip)
+                                                           withObject:nil afterDelay:0];
         enteringFullScreen = FALSE;
         enteredFullScreenTime = [[NSProcessInfo processInfo] systemUptime];
         if (inAutoFullScreen)
@@ -3436,6 +3463,8 @@ static NSString* metal_layer_filter(BOOL mode)
 
     - (void) windowDidExitFullScreen:(NSNotification*)notification
     {
+        [[WineApplicationController sharedController] performSelector:@selector(updateImplicitCursorClip)
+                                                           withObject:nil afterDelay:0];
         exitingFullScreen = FALSE;
         if (inAutoFullScreen)
         {

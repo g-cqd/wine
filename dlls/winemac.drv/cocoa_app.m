@@ -836,8 +836,23 @@ static NSString* WineLocalizedString(unsigned int stringID)
         NSApplicationPresentationOptions options = NSApplicationPresentationDefault;
         WineWindow* window;
 
-        /* AppKit owns the options of a window in native fullscreen. */
-        if (current & NSApplicationPresentationFullScreen) return;
+        /* In a native full-screen space AppKit sets the options; for the space we entered for a Win32
+           program, keep the Dock and the menu bar hidden rather than auto-hidden: probed on macOS 27,
+           with the auto-hide options AppKit proposes the Dock comes on screen when the cursor pushes the
+           bottom edge, and with HideDock | HideMenuBar it doesn't. */
+        if (current & NSApplicationPresentationFullScreen)
+        {
+            WineWindow* key = (WineWindow*)[NSApp keyWindow];
+
+            if (active && [key isKindOfClass:[WineWindow class]] && [key isInAutoFullScreen])
+            {
+                options = (current & ~(NSApplicationPresentationAutoHideDock | NSApplicationPresentationAutoHideMenuBar)) |
+                          NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
+                if (options != current)
+                    [NSApp setPresentationOptions:options];
+            }
+            return;
+        }
 
         if (active && ![self areDisplaysCaptured])
         {
@@ -1166,12 +1181,60 @@ static NSString* WineLocalizedString(unsigned int stringID)
         /* Another process may have replaced the native cursor since the last request. */
         clientWantsCursorHidden = TRUE;
         [self updateCursor:TRUE];
+        [self updateImplicitCursorClip];
     }
 
     - (void) unhideCursor
     {
         clientWantsCursorHidden = FALSE;
         [self updateCursor:FALSE];
+        [self updateImplicitCursorClip];
+    }
+
+    /* ClipCursor from the program: an empty clip hands the cursor back to the implicit one, if any. */
+    - (BOOL) clipCursorForWin32:(BOOL)clipping rect:(CGRect)rect
+    {
+        BOOL ret = TRUE;
+
+        win32ClipsCursor = clipping;
+        if (clipping)
+        {
+            implicitCursorClip = FALSE;
+            return [self startClippingCursor:rect];
+        }
+        if (!implicitCursorClip)
+            ret = [self stopClippingCursor];
+        [self updateImplicitCursorClip];
+        return ret;
+    }
+
+    /* A full-screen Windows game typically hides the cursor and reads relative
+       motion without clipping it: on Windows the invisible cursor reaching a
+       screen edge does nothing.  In a macOS full-screen space it reveals the
+       Dock or the menu bar, which then take the clicks.  While the program
+       hides the cursor, its key window is in the space we entered for it and
+       the app is active, keep the cursor inside the window, just short of its
+       edges.  Motion pinned at the boundary still arrives as relative moves.
+       A ClipCursor from the program takes precedence. */
+    - (void) updateImplicitCursorClip
+    {
+        WineWindow* key = (WineWindow*)[NSApp keyWindow];
+        BOOL want = clientWantsCursorHidden && [NSApp isActive] && !win32ClipsCursor &&
+                    [key isKindOfClass:[WineWindow class]] && [key isInAutoFullScreen];
+
+        if (want)
+        {
+            NSRect frame = NSInsetRect([key frame], 2, 2);
+
+            [self flipRect:&frame];
+            implicitCursorClip = [self startClippingCursor:NSRectToCGRect(frame)];
+        }
+        else if (implicitCursorClip)
+        {
+            implicitCursorClip = FALSE;
+            if (!win32ClipsCursor)
+                [self stopClippingCursor];
+        }
     }
 
     - (void) setCursor:(NSCursor*)newCursor
@@ -2658,6 +2721,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
         macdrv_event* event;
         WineEventQueue* queue;
 
+        [self updateImplicitCursorClip];
+
         [self invalidateGotFocusEvents];
 
         if (!temporarilyIgnoreResignEventsForDialog)
@@ -3067,10 +3132,7 @@ int macdrv_clip_cursor(CGRect r)
             }
         }
 
-        if (clipping)
-            ret = [controller startClippingCursor:rect];
-        else
-            ret = [controller stopClippingCursor];
+        ret = [controller clipCursorForWin32:clipping rect:rect];
     });
 
     return ret;
