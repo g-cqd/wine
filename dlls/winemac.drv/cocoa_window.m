@@ -3604,6 +3604,22 @@ static NSString* metal_layer_filter(BOOL mode)
         [latentChildWindows removeAllObjects];
     }
 
+    /* A Windows program in exclusive full screen owns the whole screen: in the
+       space we entered for it, keep the menu bar and the Dock from sliding in
+       when the cursor reaches the top or bottom edge, which on Windows does
+       nothing and here covered the game and took its clicks.  A space the
+       user entered with the green button keeps AppKit's behaviour. */
+    - (NSApplicationPresentationOptions) window:(NSWindow*)window
+        willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)proposedOptions
+    {
+        if (wantsNativeFullScreen)
+        {
+            proposedOptions &= ~(NSApplicationPresentationAutoHideDock | NSApplicationPresentationAutoHideMenuBar);
+            proposedOptions |= NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
+        }
+        return proposedOptions;
+    }
+
     - (void) windowWillEnterFullScreen:(NSNotification*)notification
     {
         nonFullscreenFrame = self.wine_fractionalFrame;
