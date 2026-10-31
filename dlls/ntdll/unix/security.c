@@ -829,7 +829,7 @@ NTSTATUS WINAPI NtFilterToken( HANDLE token, ULONG flags, TOKEN_GROUPS *disable_
             sids_len += offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
         }
 
-        sids = malloc( sids_len );
+        sids = malloc( max( 1, sids_len ) );
         if (!sids) return STATUS_NO_MEMORY;
 
         for (i = 0, tmp = (BYTE *)sids; i < disable_sids->GroupCount; i++, tmp += len)
