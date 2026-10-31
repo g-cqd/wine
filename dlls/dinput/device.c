@@ -473,14 +473,18 @@ void queue_event( IDirectInputDevice8W *iface, int index, DWORD data, DWORD time
     /* Send event if asked */
 }
 
-/* Only another window in the foreground has priority over a foreground device.  When no window is
- * foreground (the host desktop or another host app is in front) there is nothing to yield to, and Wine
- * cannot make the window foreground while its thread is busy, unlike Windows: a game that re-acquires
- * in a loop inside its window procedure would never get its input back (Watch_Dogs hangs at the splash). */
+/* DIERR_OTHERAPPHASPRIO means another application has the foreground. A window of the same process (a
+ * splash screen in front of a still hidden main window), the desktop or no window at all is not another
+ * application. Wine also only makes a window foreground once its thread handles the activation, so a game
+ * that re-acquires in a loop inside its window procedure (Watch_Dogs at its splash screen) would otherwise
+ * never get its input back. */
 static BOOL foreground_taken_by_other( HWND win )
 {
     HWND foreground = GetForegroundWindow();
-    return foreground && foreground != win && foreground != GetDesktopWindow();
+    DWORD pid;
+
+    if (!foreground || foreground == win || foreground == GetDesktopWindow()) return FALSE;
+    return GetWindowThreadProcessId( foreground, &pid ) && pid != GetCurrentProcessId();
 }
 
 static HRESULT WINAPI dinput_device_Acquire( IDirectInputDevice8W *iface )
