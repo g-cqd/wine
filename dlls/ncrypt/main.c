@@ -112,16 +112,14 @@ static SECURITY_STATUS set_object_property(struct object *object, const WCHAR *n
 
     if (!property && !(property = add_object_property(object, name))) return NTE_NO_MEMORY;
 
-    property->value_size = value_size;
-    if (!(tmp = realloc(property->value, value_size)))
+    if (!(tmp = realloc(property->value, max(1, value_size))))
     {
         ERR("Error allocating memory.\n");
-        free(property->key);
-        property->key = NULL;
         return NTE_NO_MEMORY;
     }
 
     property->value = tmp;
+    property->value_size = value_size;
     memcpy(property->value, value, value_size);
 
     return ERROR_SUCCESS;
