@@ -99,6 +99,7 @@ struct coreaudio_stream
     UINT32 cap_bufsize_frames, cap_offs_frames, cap_held_frames;
     UINT32 wrap_bufsize_frames;
     UINT64 written_frames;
+    UINT32 underrun_frames, underrun_callbacks; /* silence played while playing, for the starvation report */
     INT32 getbuf_last;
     WAVEFORMATEX *fmt;
     BYTE *local_buffer, *cap_buffer, *wrap_buffer, *resamp_buffer, *tmp_buffer;
@@ -419,8 +420,13 @@ static OSStatus ca_render_cb(void *user, AudioUnitRenderActionFlags *flags,
     }else
         to_copy_bytes = to_copy_frames = 0;
 
-    if(nframes > to_copy_frames)
+    if(nframes > to_copy_frames){
         silence_buffer(stream, ((BYTE *)data->mBuffers[0].mData) + to_copy_bytes, nframes - to_copy_frames);
+        if(stream->playing){
+            stream->underrun_frames += nframes - to_copy_frames;
+            stream->underrun_callbacks++;
+        }
+    }
 
     os_unfair_lock_unlock(&stream->lock);
 
@@ -721,6 +727,28 @@ static AudioDeviceID dev_id_from_device(const char *device)
     return id;
 }
 
+static NTSTATUS unix_get_mix_format(void *args);
+
+/* In shared mode Windows only accepts the channel count of the mix format (unless the client asks for
+ * AUTOCONVERTPCM): a game offered 5.1 on a stereo device mixes its dialogue into the centre channel, and
+ * the HAL output unit maps channels one to one, so everything but the front pair was silently dropped. */
+static BOOL shared_render_channels_differ(const char *device, EDataFlow flow, AUDCLNT_SHAREMODE share,
+                                          const WAVEFORMATEX *fmt)
+{
+    struct get_mix_format_params mix;
+    WAVEFORMATEXTENSIBLE mix_fmt;
+
+    if(flow != eRender || share != AUDCLNT_SHAREMODE_SHARED) return FALSE;
+    mix.device = device;
+    mix.flow = flow;
+    mix.fmt = &mix_fmt;
+    unix_get_mix_format(&mix);
+    if(FAILED(mix.result)) return FALSE;
+    if(fmt->nChannels == mix_fmt.Format.nChannels) return FALSE;
+    TRACE("%u channels asked, the device mixes %u\n", fmt->nChannels, mix_fmt.Format.nChannels);
+    return TRUE;
+}
+
 static NTSTATUS unix_create_stream(void *args)
 {
     struct create_stream_params *params = args;
@@ -730,6 +758,12 @@ static NTSTATUS unix_create_stream(void *args)
     SIZE_T size;
 
     params->result = S_OK;
+
+    if(!(params->flags & AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM) &&
+       shared_render_channels_differ(params->device, params->flow, params->share, params->fmt)){
+        params->result = AUDCLNT_E_UNSUPPORTED_FORMAT;
+        return STATUS_SUCCESS;
+    }
 
     if (!(stream = calloc(1, sizeof(*stream)))) {
         params->result = E_OUTOFMEMORY;
@@ -1129,6 +1163,11 @@ static NTSTATUS unix_is_format_supported(void *args)
     AudioComponentInstance unit;
     const AudioDeviceID dev_id = dev_id_from_device(params->device);
 
+    if(shared_render_channels_differ(params->device, params->flow, params->share, params->fmt_in)){
+        params->result = S_FALSE;
+        return STATUS_SUCCESS;
+    }
+
     unit = get_audiounit(params->flow, dev_id);
 
     converter = NULL;
@@ -1442,6 +1481,31 @@ static NTSTATUS unix_reset(void *args)
     return STATUS_SUCCESS;
 }
 
+/* The render callback runs on a real-time thread and must not log; report what it counted from the
+ * timer thread, at most once a second, so starvation (crackling) shows up with WINEDEBUG=warn+coreaudio. */
+static void report_underruns(struct coreaudio_stream *stream)
+{
+    static const LONGLONG second = 10000000;
+    static __thread LONGLONG last_report;
+    UINT32 frames, callbacks;
+    LARGE_INTEGER now;
+
+    if(stream->flow != eRender) return;
+    NtQuerySystemTime(&now);
+    if(now.QuadPart - last_report < second) return;
+    last_report = now.QuadPart;
+
+    os_unfair_lock_lock(&stream->lock);
+    frames = stream->underrun_frames;
+    callbacks = stream->underrun_callbacks;
+    stream->underrun_frames = stream->underrun_callbacks = 0;
+    os_unfair_lock_unlock(&stream->lock);
+
+    if(callbacks)
+        WARN("stream %p starved: %u callbacks played %u frames (%u ms) of silence in the last second\n",
+             stream, callbacks, frames, frames * 1000 / stream->fmt->nSamplesPerSec);
+}
+
 static NTSTATUS unix_timer_loop(void *args)
 {
     struct timer_loop_params *params = args;
@@ -1455,6 +1519,7 @@ static NTSTATUS unix_timer_loop(void *args)
 
     while(!stream->please_quit){
         NtSetEvent(stream->event, NULL);
+        report_underruns(stream);
         NtDelayExecution(FALSE, &delay);
         NtQueryPerformanceCounter(&last, NULL);
 
