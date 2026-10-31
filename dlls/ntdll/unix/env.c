@@ -952,8 +952,11 @@ static void set_env_var( WCHAR **env, SIZE_T *pos, SIZE_T *size,
     len = wcslen( value );
     if (*pos + namelen + len + 3 > *size)
     {
-        *size = max( *size * 2, *pos + namelen + len + 3 );
-        *env = realloc( *env, *size * sizeof(WCHAR) );
+        SIZE_T new_size = max( *size * 2, *pos + namelen + len + 3 );
+        WCHAR *new_env = realloc( *env, new_size * sizeof(WCHAR) );
+        if (!new_env) return;
+        *env = new_env;
+        *size = new_size;
     }
     memcpy( *env + *pos, name, namelen * sizeof(WCHAR) );
     (*env)[*pos + namelen] = '=';
@@ -1788,7 +1791,12 @@ void set_process_env_var( const char *name, const char *value )
         valueW[ntdll_umbstowcs( value, len, valueW, len )] = 0;
     }
     append_envW( &env, &pos, &size, name, valueW );
-    if (pos + 1 > size && !(env = realloc( env, (pos + 1) * sizeof(WCHAR) ))) goto done;
+    if (pos + 1 > size)
+    {
+        WCHAR *new_env = realloc( env, (pos + 1) * sizeof(WCHAR) );
+        if (!new_env) goto done;
+        env = new_env;
+    }
     env[pos++] = 0;
 
     alloc = pos * sizeof(WCHAR);
