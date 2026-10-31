@@ -668,6 +668,45 @@ static void win32u_vkDestroyInstance( VkInstance client_instance, const VkAlloca
     free( instance );
 }
 
+static const char * const core_feature_names[] =
+{
+    "robustBufferAccess", "fullDrawIndexUint32", "imageCubeArray", "independentBlend", "geometryShader",
+    "tessellationShader", "sampleRateShading", "dualSrcBlend", "logicOp", "multiDrawIndirect",
+    "drawIndirectFirstInstance", "depthClamp", "depthBiasClamp", "fillModeNonSolid", "depthBounds", "wideLines",
+    "largePoints", "alphaToOne", "multiViewport", "samplerAnisotropy", "textureCompressionETC2",
+    "textureCompressionASTC_LDR", "textureCompressionBC", "occlusionQueryPrecise", "pipelineStatisticsQuery",
+    "vertexPipelineStoresAndAtomics", "fragmentStoresAndAtomics", "shaderTessellationAndGeometryPointSize",
+    "shaderImageGatherExtended", "shaderStorageImageExtendedFormats", "shaderStorageImageMultisample",
+    "shaderStorageImageReadWithoutFormat", "shaderStorageImageWriteWithoutFormat",
+    "shaderUniformBufferArrayDynamicIndexing", "shaderSampledImageArrayDynamicIndexing",
+    "shaderStorageBufferArrayDynamicIndexing", "shaderStorageImageArrayDynamicIndexing", "shaderClipDistance",
+    "shaderCullDistance", "shaderFloat64", "shaderInt64", "shaderInt16", "shaderResourceResidency",
+    "shaderResourceMinLod", "sparseBinding", "sparseResidencyBuffer", "sparseResidencyImage2D",
+    "sparseResidencyImage3D", "sparseResidency2Samples", "sparseResidency4Samples", "sparseResidency8Samples",
+    "sparseResidency16Samples", "sparseResidencyAliased", "variableMultisampleRate", "inheritedQueries",
+};
+C_ASSERT( ARRAY_SIZE(core_feature_names) == sizeof(VkPhysicalDeviceFeatures) / sizeof(VkBool32) );
+
+/* Windows games often request core features without checking that the device offers them, because every
+ * Windows driver they were tested on does. A host driver that lacks one (MoltenVK: no shaderCullDistance,
+ * shaderFloat64, geometryShader, ...) would then fail vkCreateDevice with VK_ERROR_FEATURE_NOT_PRESENT and the
+ * game would not start at all. Drop the unsupported ones from the request instead; a shader that really uses
+ * one still fails at pipeline creation, which is no worse. */
+static void mask_unsupported_features( const VkPhysicalDeviceFeatures *host, VkPhysicalDeviceFeatures *requested )
+{
+    const VkBool32 *have = (const VkBool32 *)host;
+    VkBool32 *want = (VkBool32 *)requested;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(core_feature_names); i++)
+    {
+        if (!want[i] || have[i]) continue;
+        FIXME( "Device feature %s is requested but not supported by the host driver, not enabling it.\n",
+               core_feature_names[i] );
+        want[i] = VK_FALSE;
+    }
+}
+
 static VkResult convert_device_create_info( struct vulkan_physical_device *physical_device, VkDeviceCreateInfo *info,
                                             struct mempool *pool, struct vulkan_device *device )
 {
@@ -678,6 +717,25 @@ static VkResult convert_device_create_info( struct vulkan_physical_device *physi
     /* Should be filtered out by loader as ICDs don't support layers. */
     info->enabledLayerCount = 0;
     info->ppEnabledLayerNames = NULL;
+
+    if (info->pEnabledFeatures || find_next_struct( info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 ))
+    {
+        VkPhysicalDeviceFeatures host_features = {0};
+        VkPhysicalDeviceFeatures2 *features2;
+
+        instance->p_vkGetPhysicalDeviceFeatures( physical_device->host.physical_device, &host_features );
+        if (info->pEnabledFeatures)
+        {
+            VkPhysicalDeviceFeatures *features;
+            if (!(features = mem_alloc( pool, sizeof(*features) ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
+            *features = *info->pEnabledFeatures;
+            mask_unsupported_features( &host_features, features );
+            info->pEnabledFeatures = features;
+        }
+        /* the chain is a host copy made by the thunks */
+        if ((features2 = (VkPhysicalDeviceFeatures2 *)find_next_struct( info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 )))
+            mask_unsupported_features( &host_features, &features2->features );
+    }
 
     if (device->extensions.has_VK_KHR_win32_keyed_mutex)
     {
