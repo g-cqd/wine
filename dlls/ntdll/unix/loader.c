@@ -2761,6 +2761,16 @@ static void start_main_thread(void)
                 WARN( "error loading compatdb.so: %s\n", dlerror() );
             free(name);
         }
+        /* a runtime rule's DLL directory goes ahead of the backend directory compatdb.so chose */
+        if (hub_rules_dll_dir())
+        {
+            char *dir = NULL;
+            if (asprintf( &dir, "%s/%s", dll_dir ? dll_dir : ntdll_dir, hub_rules_dll_dir() ) > 0)
+            {
+                prepend_dll_path( dir );  /* keeps the pointer */
+                fprintf( stderr, "hubrules: DLL directory %s ahead of the backend\n", dir );
+            }
+        }
     }
 
     /* compatdb.so may have forced large address awareness, directly or through

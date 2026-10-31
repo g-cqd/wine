@@ -392,6 +392,7 @@ extern NTSTATUS unix_to_nt_file_name( const char *unix_name, WCHAR **nt, UINT di
 extern NTSTATUS get_full_path( char *name, const WCHAR *curdir, UNICODE_STRING *nt_name );
 extern void hub_rules_apply( const char *unix_path );
 extern void hub_rules_fixup_main_image( void *base );
+extern const char *hub_rules_dll_dir(void);
 extern void set_process_env_var( const char *name, const char *value );
 extern NTSTATUS get_nt_path( const WCHAR *name, UNICODE_STRING *nt_name );
 extern NTSTATUS open_unix_file( HANDLE *handle, const char *unix_name, ACCESS_MASK access,

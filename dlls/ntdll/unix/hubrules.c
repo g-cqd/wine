@@ -64,6 +64,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(module);
 /* Set by a detection rule with gate_selector_fixup=true: rewrite the 64-bit code selector of the
  * Heaven's-gate far jumps in the main image (see hub_rules_fixup_main_image). */
 static BOOL gate_selector_fixup;
+#define DLL_DIR_KEY     "hub_dll_dir="
+static char *hub_dll_dir;   /* relative to the runtime's lib/wine, e.g. dxgi/d3dmetal */
 
 struct pe_facts
 {
@@ -283,6 +285,43 @@ static BOOL strip_setting( char *settings, const char *setting )
     return FALSE;
 }
 
+/* Remove the field starting with key from the ;-separated settings and return a copy of its value. */
+static char *take_setting_value( char *settings, const char *key )
+{
+    size_t len = strlen( key );
+    char *p = settings, *value = NULL;
+
+    while (*p)
+    {
+        char *end = strchr( p, ';' );
+        size_t field = end ? (size_t)(end - p) : strlen( p );
+
+        if (field > len && !strncmp( p, key, len ))
+        {
+            value = strndup( p + len, field - len );
+            if (end) memmove( p, end + 1, strlen( end + 1 ) + 1 );
+            else if (p > settings) p[-1] = 0;
+            else *p = 0;
+            return value;
+        }
+        if (!end) break;
+        p = end + 1;
+    }
+    return NULL;
+}
+
+/***********************************************************************
+ *           hub_rules_dll_dir
+ *
+ * The DLL directory a detection rule chose for this process (hub_dll_dir=), relative to lib/wine, or NULL.
+ * compatdb.so knows only its own backends (dxmt, gptk, wined3d) and its built-in rules choose them for some
+ * programs (gptk for steamwebhelper.exe); this puts another directory ahead of them for one program.
+ */
+const char *hub_rules_dll_dir(void)
+{
+    return hub_dll_dir;
+}
+
 /***********************************************************************
  *           hub_rules_fixup_main_image
  *
@@ -382,6 +421,16 @@ void hub_rules_apply( const char *unix_path )
         matched++;
         fprintf( stderr, "hubrules: %s matches line %u: %s\n", exe, lineno, arrow );
         if (strip_setting( arrow, GATE_KEY )) gate_selector_fixup = TRUE;
+        {
+            char *dir = take_setting_value( arrow, DLL_DIR_KEY );
+            if (dir && (strstr( dir, ".." ) || *dir == '/'))
+            {
+                WARN( "line %u: %s%s must be relative to lib/wine, ignored\n", lineno, DLL_DIR_KEY, dir );
+                free( dir );
+                dir = NULL;
+            }
+            if (dir) { free( hub_dll_dir ); hub_dll_dir = dir; }
+        }
         if (!*arrow) continue;  /* only runtime capabilities, nothing for compatdb */
         snprintf( tag, sizeof(tag), "name=hubrules-%u;exe=", lineno );
         if (!append_line( &out, &len, &cap, tag, exe, "" ) ) goto done;
