@@ -520,7 +520,7 @@ static void set_home_dir(void)
     }
     if ((p = strrchr( name, '/' ))) name = p + 1;
     if ((p = strrchr( name, '\\' ))) name = p + 1;
-    home_dir = strdup( home );
+    home_dir = home ? strdup( home ) : NULL;
     user_name = strdup( name );
 }
 
@@ -554,8 +554,10 @@ static void init_paths(void)
 
     if ((build_dir = remove_tail( ntdll_dir, "/dlls/ntdll" )))
     {
+        char *wow64_loader = build_path( build_dir, "loader-wow64" );
         wineloader = build_path( build_dir, "loader/wine" );
-        alt_build_dir = realpath_dirname( build_path( build_dir, "loader-wow64" ));
+        alt_build_dir = realpath_dirname( wow64_loader );
+        free( wow64_loader );
     }
     else
     {
@@ -1096,17 +1098,21 @@ static void preloader_exec( char **argv, const char *image_path, WORD machine )
             /* argv[0] is the (unused, possibly NULL) preloader slot; the real
              * program + args are argv[1..], so count and copy from index 1. */
             for (n = 1; argv[n]; n++) {}
-            coop_argv = malloc( (n + 2) * sizeof(*coop_argv) );
-            coop_argv[0] = strdup( rosetta_path );
-            coop_argv[1] = coop_flag;
-            for (i = 1; i <= n; i++) coop_argv[i + 1] = argv[i]; /* copies argv[1..] + NULL terminator */
-            env_path = getenv( "ROSETTA_X87_PATH" );
-            ERR( "%s: attaching rosettax87 --cooperative (%s) for %s\n",
-                 env_path && !strcmp( env_path, rosetta_path ) ? "ROSETTA_X87_PATH" : "x87sidecar",
-                 rosetta_path, target );
-            save_rosetta_aot_env();
-            execv( coop_argv[0], coop_argv );
-            unsetenv( X87_SAVED_AOT_ENV );
+            if ((coop_argv = malloc( (n + 2) * sizeof(*coop_argv) )))
+            {
+                coop_argv[0] = (char *)rosetta_path;
+                coop_argv[1] = coop_flag;
+                for (i = 1; i <= n; i++) coop_argv[i + 1] = argv[i]; /* copies argv[1..] + NULL terminator */
+                env_path = getenv( "ROSETTA_X87_PATH" );
+                TRACE( "%s: attaching rosettax87 --cooperative (%s) for %s\n",
+                     env_path && !strcmp( env_path, rosetta_path ) ? "ROSETTA_X87_PATH" : "x87sidecar",
+                     rosetta_path, target );
+                save_rosetta_aot_env();
+                execv( coop_argv[0], coop_argv );
+                WARN( "execv %s failed: %s\n", rosetta_path, strerror( errno ));
+                unsetenv( X87_SAVED_AOT_ENV );
+                free( coop_argv );
+            }
         }
     }
 #endif
@@ -1179,10 +1185,13 @@ static int exec_wineserver( pid_t *pid, char **argv )
     if (!build_path_and_exec( pid, bin_dir, "wineserver", argv )) return 0;
     if ((path = getenv( "WINESERVER" )) && !build_path_and_exec( pid, "", path, argv )) return 0;
 
-    if ((path = getenv( "PATH" )))
+    if ((path = getenv( "PATH" )) && (path = strdup( path )))
     {
-        for (path = strtok( strdup( path ), ":" ); path; path = strtok( NULL, ":" ))
-            if (!build_path_and_exec( pid, path, "wineserver", argv )) return 0;
+        char *dir;
+        for (dir = strtok( path, ":" ); dir; dir = strtok( NULL, ":" ))
+            if (!build_path_and_exec( pid, dir, "wineserver", argv )) break;
+        free( path );
+        if (dir) return 0;
     }
     return build_path_and_exec( pid, BINDIR, "wineserver", argv );
 }
@@ -2464,7 +2473,7 @@ static void load_ntdll(void)
     const char *pe_dir = get_pe_dir( current_machine );
     USHORT machine = current_machine;
     unsigned int status;
-    SECTION_IMAGE_INFORMATION info;
+    SECTION_IMAGE_INFORMATION info = {0};
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING str;
     void *module;
@@ -2574,7 +2583,7 @@ static void load_apiset_dll(void)
 static void load_wow64_ntdll( USHORT machine )
 {
     static const WCHAR ntdllW[] = {'n','t','d','l','l','.','d','l','l',0};
-    SECTION_IMAGE_INFORMATION info;
+    SECTION_IMAGE_INFORMATION info = {0};
     UNICODE_STRING nt_name;
     void *module;
     unsigned int status;
