@@ -2054,7 +2054,7 @@ static HRESULT WINAPI dinput_device_SetActionMap( IDirectInputDevice8W *iface, D
                action->dwObjID, action->dwHow, debugstr_w(action->lptszActionName) );
     }
 
-    if (!(data_format.rgodf = malloc( sizeof(DIOBJECTDATAFORMAT) * format->dwNumActions ))) return DIERR_OUTOFMEMORY;
+    if (!(data_format.rgodf = malloc( sizeof(DIOBJECTDATAFORMAT) * max( 1, format->dwNumActions ) ))) return DIERR_OUTOFMEMORY;
     data_format.dwDataSize = format->dwDataSize;
 
     for (i = 0; i < format->dwNumActions; i++, offset += sizeof(ULONG))
