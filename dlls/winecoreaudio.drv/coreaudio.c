@@ -612,6 +612,22 @@ static HRESULT ca_get_audiodesc(AudioStreamBasicDescription *desc,
     return S_OK;
 }
 
+/* The default speaker positions for a channel count, as the other Wine audio drivers use them. */
+static DWORD default_channel_mask(unsigned int channels)
+{
+    switch(channels){
+    case 1: return KSAUDIO_SPEAKER_MONO;
+    case 2: return KSAUDIO_SPEAKER_STEREO;
+    case 3: return KSAUDIO_SPEAKER_STEREO | SPEAKER_LOW_FREQUENCY;
+    case 4: return KSAUDIO_SPEAKER_QUAD;
+    case 5: return KSAUDIO_SPEAKER_QUAD | SPEAKER_LOW_FREQUENCY;
+    case 6: return KSAUDIO_SPEAKER_5POINT1;
+    case 7: return KSAUDIO_SPEAKER_5POINT1 | SPEAKER_BACK_CENTER;
+    case 8: return KSAUDIO_SPEAKER_7POINT1_SURROUND;
+    }
+    return 0;
+}
+
 static HRESULT ca_setup_audiounit(EDataFlow dataflow, AudioComponentInstance unit,
                                   const WAVEFORMATEX *fmt, AudioStreamBasicDescription *dev_desc,
                                   AudioConverterRef *converter)
@@ -684,15 +700,24 @@ static HRESULT ca_setup_audiounit(EDataFlow dataflow, AudioComponentInstance uni
             return osstatus_to_hresult(sc);
         }
 
-        /* Set channel layout: AudioChannelBitmap and dwChannelMask conveniently have identical positions */
+        /* Set channel layout: AudioChannelBitmap and dwChannelMask conveniently have identical positions.
+         * AUHAL refuses (kAudioUnitErr_InvalidPropertyValue) a bitmap whose bit count is not the stream's
+         * channel count, including the 0 ("unspecified") mask WAVE_FORMAT_EXTENSIBLE allows: use the default
+         * positions for the channel count then. */
         layout.mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelBitmap;
-        layout.mChannelBitmap    = (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE) ? ((WAVEFORMATEXTENSIBLE *)fmt)->dwChannelMask : 0x3;
+        layout.mChannelBitmap    = (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE) ? ((WAVEFORMATEXTENSIBLE *)fmt)->dwChannelMask : 0;
         layout.mNumberChannelDescriptions = 0;
+        if (__builtin_popcount(layout.mChannelBitmap) != fmt->nChannels)
+            layout.mChannelBitmap = default_channel_mask(fmt->nChannels);
 
-        sc = AudioUnitSetProperty(unit, kAudioUnitProperty_AudioChannelLayout,
-                                  kAudioUnitScope_Input, 0, &layout, sizeof(layout));
-        if (sc != noErr)
-            WARN("Couldn't set channel layout: %d\n", (int)sc);
+        if (layout.mChannelBitmap)
+        {
+            sc = AudioUnitSetProperty(unit, kAudioUnitProperty_AudioChannelLayout,
+                                      kAudioUnitScope_Input, 0, &layout, sizeof(layout));
+            if (sc != noErr)
+                WARN("Couldn't set channel layout %#x for %u channels: %d\n", (unsigned int)layout.mChannelBitmap,
+                     fmt->nChannels, (int)sc);
+        }
     }
 
     return S_OK;
@@ -758,6 +783,7 @@ static NTSTATUS unix_create_stream(void *args)
     SIZE_T size;
 
     params->result = S_OK;
+
 
     if(!(params->flags & AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM) &&
        shared_render_channels_differ(params->device, params->flow, params->share, params->fmt)){
