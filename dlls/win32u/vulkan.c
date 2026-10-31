@@ -1875,9 +1875,15 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
     /* If the swapchain image size is not equal to the presentation size (e.g. because of DPI virtualization or
      * display mode change emulation), MoltenVK's vkQueuePresentKHR returns VK_SUBOPTIMAL_KHR.
      * Create the swapchain with VkSwapchainPresentScalingCreateInfoEXT to avoid this.
+     *
+     * Do it even when the image size equals the client rect: MoltenVK compares the image size with the Metal
+     * layer's natural size (its bounds times its contents scale), which differs from the client rect when the
+     * view is scaled, e.g. in the macOS full-screen space or on a HiDPI display. A game that recreates its
+     * swapchain on VK_SUBOPTIMAL_KHR (Wolfenstein II) then does so on every frame and shows a black frame each
+     * time. On Windows the swapchain is the size the program asked for and the compositor scales it, which is
+     * what deliberate scaling gives; Wine's own checks below still report a client rect change as suboptimal.
      */
     if (get_surface_rect( surface->hwnd, &client_rect, NtUserGetWinMonitorDpi( surface->hwnd, MDT_RAW_DPI ) ) &&
-        !extents_equals( &create_info_host.imageExtent, &client_rect ) &&
         instance->extensions.has_VK_EXT_surface_maintenance1 &&
         physical_device->extensions.has_VK_KHR_swapchain_maintenance1)
     {
