@@ -233,7 +233,7 @@ void DSOUND_CheckEvent(const IDirectSoundBufferImpl *dsb, DWORD playpos, int len
     if(first == dsb->nrofnotifies)
         return;
 
-    check = left = first;
+    left = first;
     right = dsb->nrofnotifies - 1;
 
     /* find leftmost notify that is greater than playpos */
@@ -364,7 +364,7 @@ static const struct fir_phases *get_fir_phases(IDirectSoundBufferImpl *dsb)
     fp->den = den;
     fp->firstep = firstep;
     gcd = fir_gcd(num, den);
-    if (!gcd || den / gcd > MAX_FIR_PHASES)
+    if (!gcd || den <= 0 || den / gcd > MAX_FIR_PHASES)
     {
         dsb->fir_phases = fp;
         return fp;
