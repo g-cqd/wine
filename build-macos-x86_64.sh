@@ -25,6 +25,11 @@
 #                    A path under /Volumes/<name> is refused unless that volume
 #                    is mounted, so nothing lands on the internal disk by mistake.
 #   WINE_BUILD_JOBS  make parallelism (default: hw.ncpu)
+#   WINEKIT_PACKAGE  the WineKit Swift package ntdll links (default:
+#                    ~/Developer/GameHub/winekit); `make` first runs its
+#                    `swift package wine-objects` into WINEKIT_DIR
+#   WINEKIT_DIR      where libwinekit.a and winekit.h go (default:
+#                    /Volumes/ExT2/GameHub/build/winekit)
 #
 # The default build directory is on the ExT2 volume because build artifacts are
 # runtime-adjacent (wine runs from them and they are large), and keeping them
@@ -94,6 +99,7 @@ export LDFLAGS="-L/usr/local/lib"
 export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/opt/krb5/lib/pkgconfig"
 # llvm-dlltool (needed by winebuild for import libraries) only ships in the
 # arm64 Homebrew LLVM keg, which isn't linked onto PATH.
+ORIGINAL_PATH=$PATH   # WineKit builds with the caller's swift, nm and ar
 export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
 
 do_configure() {
@@ -107,7 +113,15 @@ do_make() {
         echo "not configured: run ./build-macos-x86_64.sh configure" >&2
         exit 1
     fi
-    make -C "$BUILD" -j"$WINE_BUILD_JOBS" "$@"
+    # ntdll links WineKit's HubRules (Embedded Swift, libc only); see winekit/C/winekit.h
+    WINEKIT_PACKAGE=${WINEKIT_PACKAGE:-$HOME/Developer/GameHub/winekit}
+    WINEKIT_DIR=${WINEKIT_DIR:-/Volumes/ExT2/GameHub/build/winekit}
+    if [ ! -f "$WINEKIT_PACKAGE/Package.swift" ]; then
+        echo "no WineKit package at $WINEKIT_PACKAGE (set WINEKIT_PACKAGE)" >&2
+        exit 1
+    fi
+    PATH=$ORIGINAL_PATH swift package --package-path "$WINEKIT_PACKAGE" --disable-sandbox wine-objects --output "$WINEKIT_DIR" || exit 1
+    make -C "$BUILD" -j"$WINE_BUILD_JOBS" WINEKIT_DIR="$WINEKIT_DIR" "$@"
 }
 
 do_run() {
