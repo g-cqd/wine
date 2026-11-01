@@ -27,7 +27,7 @@
 #   WINE_BUILD_JOBS  make parallelism (default: hw.ncpu)
 #   WINEKIT_PACKAGE  the WineKit Swift package ntdll links (default:
 #                    ~/Developer/GameHub/winekit); `make` first runs its
-#                    `swift package wine-objects` into WINEKIT_DIR
+#                    `swift package quality wine-objects` into WINEKIT_DIR
 #   WINEKIT_DIR      where libwinekit.a and winekit.h go (default:
 #                    /Volumes/ExT2/GameHub/build/winekit)
 #
@@ -120,7 +120,7 @@ do_make() {
         echo "no WineKit package at $WINEKIT_PACKAGE (set WINEKIT_PACKAGE)" >&2
         exit 1
     fi
-    PATH=$ORIGINAL_PATH swift package --package-path "$WINEKIT_PACKAGE" --disable-sandbox wine-objects --output "$WINEKIT_DIR" || exit 1
+    PATH=$ORIGINAL_PATH swift package --package-path "$WINEKIT_PACKAGE" --disable-sandbox quality wine-objects "$WINEKIT_DIR" || exit 1
     make -C "$BUILD" -j"$WINE_BUILD_JOBS" WINEKIT_DIR="$WINEKIT_DIR" "$@"
 }
 
