@@ -80,6 +80,8 @@ static const WCHAR mode_countW[] = {'M','o','d','e','C','o','u','n','t',0};
 static const WCHAR dpiW[] = {'D','p','i',0};
 static const WCHAR depthW[] = {'D','e','p','t','h',0};
 static const WCHAR physicalW[] = {'P','h','y','s','i','c','a','l',0};
+/* the process an emulated mode belongs to: other processes keep the physical mode */
+static const WCHAR emulated_forW[] = {'E','m','u','l','a','t','e','d','F','o','r',0};
 
 static const char  guid_devclass_displayA[] = "{4D36E968-E325-11CE-BFC1-08002BE10318}";
 static const WCHAR guid_devclass_displayW[] =
@@ -570,8 +572,17 @@ static BOOL source_set_current_settings( const struct source *source, const DEVM
     if (!(hkey = reg_open_ascii_key( config_key, source->path ))) ret = FALSE;
     else
     {
+        DEVMODEW physical;
+
         ret = write_source_mode( hkey, ENUM_CURRENT_SETTINGS, mode );
         if (ret) set_reg_value( hkey, depthW, REG_DWORD, &mode->dmBitsPerPel, sizeof(mode->dmBitsPerPel) );
+        if (ret && read_source_mode( hkey, WINE_ENUM_PHYSICAL_SETTINGS, &physical ) &&
+            (mode->dmPelsWidth != physical.dmPelsWidth || mode->dmPelsHeight != physical.dmPelsHeight))
+        {
+            DWORD pid = GetCurrentProcessId();
+            set_reg_value( hkey, emulated_forW, REG_DWORD, &pid, sizeof(pid) );
+        }
+        else reg_delete_value( hkey, emulated_forW );
         NtClose( hkey );
     }
 
@@ -709,7 +720,15 @@ static BOOL read_source_from_registry( unsigned int index, struct source *source
         source->current.dmSize = sizeof(source->current);
     source->physical = source->current;
     if (read_source_mode( hkey, WINE_ENUM_PHYSICAL_SETTINGS, &source->physical ))
+    {
         source->physical.dmSize = sizeof(source->physical);
+        /* An emulated mode only changes the display for the process that set it: the host display
+         * keeps its mode, so other programs (launchers, the desktop) keep theirs too instead of
+         * being scaled to it. */
+        if (query_reg_ascii_value( hkey, "EmulatedFor", value, sizeof(buffer) ) && value->Type == REG_DWORD &&
+            *(const DWORD *)value->Data != GetCurrentProcessId())
+            source->current = source->physical;
+    }
 
     /* DeviceID */
     size = query_reg_ascii_value( hkey, "GPUID", value, sizeof(buffer) );
