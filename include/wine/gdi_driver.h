@@ -355,6 +355,9 @@ struct gdi_device_manager
 };
 
 #define WINE_DM_UNSUPPORTED 0x80000000
+/* In the current mode given to add_modes: the driver doesn't change the host mode, win32u emulates
+ * the others (as with EmulateModeset) and offers the sizes of the given host modes among them. */
+#define WINE_DM_EMULATED    0x40000000
 #define WINE_SWP_FULLSCREEN 0x80000000
 #define WINE_SWP_RESIZABLE  0x40000000
 

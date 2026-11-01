@@ -1159,10 +1159,17 @@ UINT macdrv_UpdateDisplayDevices(const struct gdi_device_manager *device_manager
 
             if (fullscreen_mode != FULLSCREEN_MODE_LEGACY)
             {
-                /* A single host mode makes win32u emulate every other mode:
-                   it lists the native mode with the standard sizes below it
-                   and reports whichever the program sets as the current one. */
-                device_manager->add_modes( &current_mode, 1, &current_mode, param );
+                /* win32u emulates every other mode: it lists the native mode, the standard
+                   sizes below it and the sizes the display offers (3840x2160 on a 4K panel
+                   used at a scaled resolution), and reports whichever the program sets as
+                   the current one. */
+                current_mode.dmDisplayFlags |= WINE_DM_EMULATED;
+                if ((modes = display_get_modes(adapter->id, &mode_count)))
+                {
+                    device_manager->add_modes( &current_mode, mode_count, modes, param );
+                    free(modes);
+                }
+                else device_manager->add_modes( &current_mode, 1, &current_mode, param );
             }
             else
             {

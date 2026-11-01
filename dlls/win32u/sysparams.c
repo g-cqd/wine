@@ -2169,10 +2169,12 @@ static DEVMODEW *get_virtual_modes( const DEVMODEW *initial, const DEVMODEW *max
     return modes;
 }
 
-static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEVMODEW *host_modes, void *param )
+static void add_modes( const DEVMODEW *current_in, UINT host_modes_count, const DEVMODEW *host_modes, void *param )
 {
     struct device_manager_ctx *ctx = param;
-    DEVMODEW dummy, physical, detached = *current, virtual, *virtual_modes = NULL;
+    DEVMODEW current_mode = *current_in, *current = &current_mode;
+    BOOL emulated = emulate_modeset || (current_mode.dmDisplayFlags & WINE_DM_EMULATED);
+    DEVMODEW dummy, physical, detached, virtual, *virtual_modes = NULL;
     UINT virtual_count, modes_count = host_modes_count;
     const DEVMODEW *modes = host_modes;
     struct source *source;
@@ -2187,7 +2189,10 @@ static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEV
     }
     source = LIST_ENTRY( list_tail( &sources ), struct source, entry );
 
-    if (emulate_modeset)
+    current_mode.dmDisplayFlags &= ~WINE_DM_EMULATED;
+    detached = current_mode;
+
+    if (emulated)
     {
         modes = current;
         modes_count = 1;
@@ -2309,6 +2314,12 @@ static UINT monitor_get_dpi( struct monitor *monitor, MONITOR_DPI_TYPE type, UIN
     UINT dpi;
 
     if (!source || !(dpi = source->dpi)) dpi = system_dpi;
+    /* A program that sets a mode other than the native one sees that mode at its size: Windows keeps
+     * a scale factor per resolution, and lower modes are used at 100%.  The ratio between the mode and
+     * the physical one below still maps it onto the whole screen. */
+    if (source && (source->current.dmPelsWidth != source->physical.dmPelsWidth ||
+                   source->current.dmPelsHeight != source->physical.dmPelsHeight))
+        dpi = USER_DEFAULT_SCREEN_DPI;
     if (source && type != MDT_EFFECTIVE_DPI)
     {
         scale_x = source->physical.dmPelsWidth / (float)source->current.dmPelsWidth;
